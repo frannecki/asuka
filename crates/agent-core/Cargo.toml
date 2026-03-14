@@ -1,0 +1,24 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow = "=1.0.75"
+async-trait = "=0.1.77"
+chrono = { version = "=0.4.31", features = ["serde"] }
+glob = "=0.3.1"
+http = "=0.2.12"
+hyper = { version = "=0.14.32", default-features = false, features = ["client", "http1", "tcp"] }
+hyper-rustls = "=0.24.2"
+rusqlite = { version = "=0.30.0", features = ["bundled"] }
+serde = { version = "=1.0.193", features = ["derive"] }
+serde_json = "=1.0.108"
+tokio = { version = "=1.35.1", features = ["full"] }
+toml = "=0.5.11"
+tracing = "=0.1.40"
+uuid = { version = "=1.6.1", features = ["serde", "v4", "v5"] }

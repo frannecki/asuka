@@ -1,0 +1,10 @@
+node_modules/
+.vscode/
+.next/
+dist/
+.DS_Store
+
+.asuka/
+/specs
+/data
+target/
