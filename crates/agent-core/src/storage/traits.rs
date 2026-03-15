@@ -1,15 +1,19 @@
 use async_trait::async_trait;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
     domain::{
-        CapabilityEnvelope, CreateMcpServerRequest, CreateMemoryDocumentRequest,
+        ArtifactRecord, CapabilityEnvelope, CreateMcpServerRequest, CreateMemoryDocumentRequest,
         CreateProviderRequest, CreateSessionRequest, CreateSkillRequest, CreateSubagentRequest,
         McpServerRecord, MemoryDocumentDetail, MemoryDocumentRecord, MemorySearchHit,
-        MemorySearchRequest, MemorySearchResult, MessageRecord, PostMessageRequest,
-        ProviderAccountRecord, ProviderModelRecord, ReindexResult, RunAccepted, RunRecord,
-        SessionDetail, SessionRecord, SkillRecord, SubagentRecord, TestResult,
-        UpdateProviderRequest, UpdateSessionRequest, UpdateSkillRequest, UpdateSubagentRequest,
+        MemorySearchRequest, MemorySearchResult, MessageRecord, PlanDetail, PlanStepKind,
+        PostMessageRequest, ProviderAccountRecord, ProviderModelRecord, ReindexResult, RunAccepted,
+        RunEventEnvelope, RunRecord, RunStepRecord, SessionDetail, SessionRecord,
+        SessionSkillsDetail, SkillPreset, SkillRecord, SubagentRecord, TaskRecord, TestResult,
+        ToolInvocationRecord, UpdateMemoryDocumentRequest, UpdateProviderRequest,
+        UpdateSessionRequest, UpdateSessionSkillBindingRequest, UpdateSkillRequest,
+        UpdateSubagentRequest,
     },
     error::CoreResult,
 };
@@ -19,6 +23,8 @@ pub struct RunContext {
     pub providers: Vec<ProviderAccountRecord>,
     pub recent_messages: Vec<MessageRecord>,
     pub memory_hits: Vec<MemorySearchHit>,
+    pub effective_skill_names: Vec<String>,
+    pub pinned_skill_names: Vec<String>,
 }
 
 #[async_trait]
@@ -38,10 +44,17 @@ pub trait AgentStore: Send + Sync {
         session_id: Uuid,
         payload: PostMessageRequest,
     ) -> CoreResult<RunAccepted>;
+    async fn get_active_run(&self, session_id: Uuid) -> CoreResult<Option<RunRecord>>;
     async fn get_run(&self, run_id: Uuid) -> CoreResult<RunRecord>;
     async fn cancel_run(&self, run_id: Uuid) -> CoreResult<RunRecord>;
     async fn fail_run(&self, run_id: Uuid, message: String) -> CoreResult<RunRecord>;
     async fn run_is_active(&self, run_id: Uuid) -> bool;
+    async fn list_run_events(
+        &self,
+        run_id: Uuid,
+        after_sequence: Option<u64>,
+    ) -> CoreResult<Vec<RunEventEnvelope>>;
+    async fn append_run_event(&self, event: RunEventEnvelope) -> CoreResult<()>;
     async fn set_run_selection(
         &self,
         run_id: Uuid,
@@ -59,8 +72,43 @@ pub trait AgentStore: Send + Sync {
         run_id: Uuid,
         response: String,
     ) -> CoreResult<MessageRecord>;
+    async fn list_tasks(&self, session_id: Option<Uuid>) -> CoreResult<Vec<TaskRecord>>;
+    async fn get_task(&self, task_id: Uuid) -> CoreResult<TaskRecord>;
+    async fn get_task_plan(&self, task_id: Uuid) -> CoreResult<PlanDetail>;
+    async fn list_task_runs(&self, task_id: Uuid) -> CoreResult<Vec<RunRecord>>;
+    async fn list_session_artifacts(&self, session_id: Uuid) -> CoreResult<Vec<ArtifactRecord>>;
+    async fn list_task_artifacts(&self, task_id: Uuid) -> CoreResult<Vec<ArtifactRecord>>;
+    async fn list_run_artifacts(&self, run_id: Uuid) -> CoreResult<Vec<ArtifactRecord>>;
+    async fn upsert_artifact(&self, artifact: ArtifactRecord) -> CoreResult<ArtifactRecord>;
+    async fn list_run_steps(&self, run_id: Uuid) -> CoreResult<Vec<RunStepRecord>>;
+    async fn start_run_step(
+        &self,
+        run_id: Uuid,
+        plan_step_id: Option<Uuid>,
+        kind: PlanStepKind,
+        title: String,
+        input_summary: String,
+    ) -> CoreResult<RunStepRecord>;
+    async fn complete_run_step(
+        &self,
+        run_step_id: Uuid,
+        output_summary: String,
+    ) -> CoreResult<RunStepRecord>;
+    async fn fail_run_step(&self, run_step_id: Uuid, error: String) -> CoreResult<RunStepRecord>;
+    async fn list_tool_invocations(&self, run_id: Uuid) -> CoreResult<Vec<ToolInvocationRecord>>;
+    async fn record_tool_invocation(
+        &self,
+        run_step_id: Uuid,
+        tool_name: String,
+        tool_source: String,
+        arguments_json: Value,
+        result_json: Value,
+        ok: bool,
+        error: Option<String>,
+    ) -> CoreResult<ToolInvocationRecord>;
     async fn write_run_memory_note(
         &self,
+        session_id: Uuid,
         user_content: &str,
         response: &str,
     ) -> CoreResult<MemoryDocumentRecord>;
@@ -72,6 +120,24 @@ pub trait AgentStore: Send + Sync {
         skill_id: Uuid,
         payload: UpdateSkillRequest,
     ) -> CoreResult<SkillRecord>;
+    async fn list_skill_presets(&self) -> CoreResult<Vec<SkillPreset>>;
+    async fn get_session_skills(&self, session_id: Uuid) -> CoreResult<SessionSkillsDetail>;
+    async fn replace_session_skills(
+        &self,
+        session_id: Uuid,
+        detail: SessionSkillsDetail,
+    ) -> CoreResult<SessionSkillsDetail>;
+    async fn update_session_skill_binding(
+        &self,
+        session_id: Uuid,
+        skill_id: Uuid,
+        payload: UpdateSessionSkillBindingRequest,
+    ) -> CoreResult<SessionSkillsDetail>;
+    async fn apply_session_skill_preset(
+        &self,
+        session_id: Uuid,
+        preset_id: String,
+    ) -> CoreResult<SessionSkillsDetail>;
 
     async fn list_subagents(&self) -> CoreResult<Vec<SubagentRecord>>;
     async fn create_subagent(&self, payload: CreateSubagentRequest) -> CoreResult<SubagentRecord>;
@@ -107,6 +173,12 @@ pub trait AgentStore: Send + Sync {
         &self,
         payload: CreateMemoryDocumentRequest,
     ) -> CoreResult<MemoryDocumentRecord>;
+    async fn update_memory_document(
+        &self,
+        document_id: Uuid,
+        payload: UpdateMemoryDocumentRequest,
+    ) -> CoreResult<MemoryDocumentRecord>;
+    async fn delete_memory_document(&self, document_id: Uuid) -> CoreResult<()>;
     async fn get_memory_document(&self, document_id: Uuid) -> CoreResult<MemoryDocumentDetail>;
     async fn search_memory(&self, payload: MemorySearchRequest) -> CoreResult<MemorySearchResult>;
     async fn reindex_memory(&self) -> CoreResult<ReindexResult>;

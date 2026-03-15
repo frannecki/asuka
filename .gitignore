@@ -2,9 +2,14 @@ node_modules/
 .vscode/
 .next/
 dist/
+__pycache__/
 .DS_Store
 
-.asuka/
+**/.asuka/
+!/.asuka/
+/.asuka/*
+!/.asuka/readme-architecture.png
+!/.asuka/readme-run-flow.png
 /specs
 /data
 target/

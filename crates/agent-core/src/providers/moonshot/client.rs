@@ -17,6 +17,8 @@ impl AgentCore {
         selection: &ProviderSelection,
         recent_messages: &[MessageRecord],
         memory_hits: &[MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
     ) -> CoreResult<String> {
         let api_key_env = selection
@@ -32,6 +34,8 @@ impl AgentCore {
                 selection,
                 recent_messages,
                 memory_hits,
+                effective_skill_names,
+                pinned_skill_names,
                 user_content,
             ),
             temperature: 1,
@@ -98,7 +102,7 @@ mod tests {
             .expect("select provider");
 
         let response = core
-            .invoke_moonshot(&selection, &[], &[], "Explain provider routing")
+            .invoke_moonshot(&selection, &[], &[], &[], &[], "Explain provider routing")
             .await
             .expect("provider response");
 
@@ -130,7 +134,7 @@ mod tests {
             .expect("select provider");
 
         let error = core
-            .invoke_moonshot(&selection, &[], &[], "Explain provider routing")
+            .invoke_moonshot(&selection, &[], &[], &[], &[], "Explain provider routing")
             .await
             .expect_err("upstream error");
 

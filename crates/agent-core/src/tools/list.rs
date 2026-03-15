@@ -89,14 +89,11 @@ impl Tool for ListTool {
                 .cmp(&right.get("path").and_then(Value::as_str))
         });
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": to_relative(&ctx.workspace_root, &target),
-                "entries": items,
-                "truncated": truncated
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": to_relative(&ctx.workspace_root, &target),
+            "entries": items,
+            "truncated": truncated
+        })))
     }
 }
 

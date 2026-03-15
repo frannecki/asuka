@@ -54,16 +54,13 @@ impl Tool for StatTool {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|value| value.as_secs());
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "kind": kind,
-                "size": metadata.len(),
-                "readonly": metadata.permissions().readonly(),
-                "modifiedUnix": modified
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "kind": kind,
+            "size": metadata.len(),
+            "readonly": metadata.permissions().readonly(),
+            "modifiedUnix": modified
+        })))
     }
 }
 
@@ -93,13 +90,10 @@ impl Tool for MkdirTool {
             .await
             .map_err(|error| CoreError::bad_request(format!("failed to create {path}: {error}")))?;
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "created": true
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "created": true
+        })))
     }
 }
 
@@ -144,13 +138,10 @@ impl Tool for MovePathTool {
             CoreError::bad_request(format!("failed to move {from} to {to}: {error}"))
         })?;
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "from": display_relative_path(&ctx.workspace_root, &source),
-                "to": display_relative_path(&ctx.workspace_root, &destination)
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "from": display_relative_path(&ctx.workspace_root, &source),
+            "to": display_relative_path(&ctx.workspace_root, &destination)
+        })))
     }
 }
 
@@ -200,13 +191,10 @@ impl Tool for DeletePathTool {
             })?;
         }
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "deleted": true
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "deleted": true
+        })))
     }
 }
 

@@ -39,7 +39,7 @@ mod tests {
 
     use super::fallback_response;
     use crate::{
-        domain::{MemorySearchHit, ProviderType},
+        domain::{MemoryScope, MemorySearchHit, ProviderType},
         runtime::ProviderSelection,
     };
 
@@ -58,6 +58,8 @@ mod tests {
             chunk_id: Uuid::new_v4(),
             document_title: "Architecture".to_string(),
             namespace: "global".to_string(),
+            memory_scope: MemoryScope::Global,
+            owner_session_id: None,
             content: "Rust backend".to_string(),
             score: 0.8,
         }];

@@ -24,7 +24,8 @@ impl AgentCore {
                 run_id,
                 session_id,
                 json!({ "delta": chunk }),
-            );
+            )
+            .await;
         }
     }
 
@@ -52,7 +53,7 @@ impl AgentCore {
         if should_write_memory_note(user_content) {
             match self
                 .store
-                .write_run_memory_note(user_content, &response)
+                .write_run_memory_note(session_id, user_content, &response)
                 .await
             {
                 Ok(memory_document) => {
@@ -64,9 +65,12 @@ impl AgentCore {
                             "documentId": memory_document.id,
                             "title": memory_document.title,
                             "namespace": memory_document.namespace,
+                            "memoryScope": memory_document.memory_scope,
+                            "ownerSessionId": memory_document.owner_session_id,
                             "chunkCount": memory_document.chunk_count
                         }),
-                    );
+                    )
+                    .await;
                 }
                 Err(error) => {
                     self.publish_event(
@@ -77,9 +81,26 @@ impl AgentCore {
                             "stepType": "memory-write-skipped",
                             "message": error.message
                         }),
-                    );
+                    )
+                    .await;
                 }
             }
+        }
+
+        if let Err(error) = self
+            .write_run_artifacts(session_id, run_id, user_content, &response)
+            .await
+        {
+            self.publish_event(
+                "run.step.started",
+                run_id,
+                session_id,
+                json!({
+                    "stepType": "artifact-write-skipped",
+                    "message": error.message
+                }),
+            )
+            .await;
         }
 
         self.publish_event(
@@ -90,7 +111,8 @@ impl AgentCore {
                 "status": "completed",
                 "messageId": assistant_message.id
             }),
-        );
+        )
+        .await;
 
         Ok(())
     }

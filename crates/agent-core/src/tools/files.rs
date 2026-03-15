@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use tokio::fs;
 
 use crate::{
+    domain::{ArtifactKind, ArtifactRenderMode},
     error::{CoreError, CoreResult},
-    tools::types::{Tool, ToolContext, ToolDescriptor, ToolResult},
+    tools::types::{Tool, ToolArtifact, ToolContext, ToolDescriptor, ToolResult},
 };
 
 pub(crate) struct ReadFileTool;
@@ -66,16 +67,13 @@ impl Tool for ReadFileTool {
             truncated = true;
         }
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "content": selected,
-                "lineStart": start_line,
-                "lineEnd": end_index,
-                "truncated": truncated
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "content": selected,
+            "lineStart": start_line,
+            "lineEnd": end_index,
+            "truncated": truncated
+        })))
     }
 }
 
@@ -148,15 +146,51 @@ impl Tool for WriteFileTool {
             }
         }
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "bytesWritten": content.len(),
-                "mode": mode
-            }),
-        })
+        let relative_path = display_relative_path(&ctx.workspace_root, &target);
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "bytesWritten": content.len(),
+            "mode": mode
+        }))
+        .with_artifacts(vec![workspace_file_artifact(
+            &relative_path,
+            &relative_path,
+            content,
+        )]))
     }
+}
+
+pub(crate) fn workspace_file_artifact(
+    relative_path: &str,
+    display_name: &str,
+    content: &str,
+) -> ToolArtifact {
+    let extension = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let (render_mode, media_type) = match extension.as_deref() {
+        Some("md") | Some("markdown") => {
+            (ArtifactRenderMode::Markdown, "text/markdown; charset=utf-8")
+        }
+        Some("html") | Some("htm") => (ArtifactRenderMode::Html, "text/html; charset=utf-8"),
+        Some("json") => (ArtifactRenderMode::Json, "application/json; charset=utf-8"),
+        Some("css") => (ArtifactRenderMode::Text, "text/css; charset=utf-8"),
+        Some("js") | Some("mjs") | Some("ts") | Some("tsx") | Some("jsx") => {
+            (ArtifactRenderMode::Text, "text/plain; charset=utf-8")
+        }
+        _ => (ArtifactRenderMode::Text, "text/plain; charset=utf-8"),
+    };
+
+    ToolArtifact::utf8(
+        format!("workspace/{relative_path}"),
+        display_name.to_string(),
+        format!("Workspace file snapshot for {relative_path}."),
+        ArtifactKind::Data,
+        render_mode,
+        media_type,
+        content.to_string(),
+    )
 }
 
 pub(crate) fn clamp_usize(value: Option<u64>, default: usize, max: usize) -> usize {

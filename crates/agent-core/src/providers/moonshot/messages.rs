@@ -9,6 +9,8 @@ pub(super) fn build_moonshot_messages(
     selection: &ProviderSelection,
     recent_messages: &[MessageRecord],
     memory_hits: &[MemorySearchHit],
+    effective_skill_names: &[String],
+    pinned_skill_names: &[String],
     user_content: &str,
 ) -> Vec<MoonshotMessage> {
     let memory_context = if memory_hits.is_empty() {
@@ -18,8 +20,8 @@ pub(super) fn build_moonshot_messages(
             .iter()
             .map(|hit| {
                 format!(
-                    "{} [{}]: {}",
-                    hit.document_title, hit.namespace, hit.content
+                    "{} [{:?}/{}]: {}",
+                    hit.document_title, hit.memory_scope, hit.namespace, hit.content
                 )
             })
             .collect::<Vec<_>>()
@@ -50,6 +52,22 @@ pub(super) fn build_moonshot_messages(
     messages.push(MoonshotMessage {
         role: "system".to_string(),
         content: format!(
+            "Effective session skills: {}. Pinned skills: {}.",
+            if effective_skill_names.is_empty() {
+                "none".to_string()
+            } else {
+                effective_skill_names.join(", ")
+            },
+            if pinned_skill_names.is_empty() {
+                "none".to_string()
+            } else {
+                pinned_skill_names.join(", ")
+            }
+        ),
+    });
+    messages.push(MoonshotMessage {
+        role: "system".to_string(),
+        content: format!(
             "Runtime selection metadata: provider={}, model={}. If the user asks which model/provider is active, answer from this metadata.",
             selection.provider_name, selection.model_name
         ),
@@ -69,7 +87,7 @@ mod tests {
 
     use super::build_moonshot_messages;
     use crate::{
-        domain::{MemorySearchHit, MessageRecord, MessageRole, ProviderType},
+        domain::{MemoryScope, MemorySearchHit, MessageRecord, MessageRole, ProviderType},
         runtime::ProviderSelection,
     };
 
@@ -96,6 +114,8 @@ mod tests {
             chunk_id: Uuid::new_v4(),
             document_title: "Platform Overview".to_string(),
             namespace: "global".to_string(),
+            memory_scope: MemoryScope::Global,
+            owner_session_id: None,
             content: "Rust backend and Next.js frontend".to_string(),
             score: 0.9,
         }];
@@ -104,17 +124,22 @@ mod tests {
             &selection,
             &recent_messages,
             &memory_hits,
+            &["research-skill".to_string()],
+            &["research-skill".to_string()],
             "What model are you using?",
         );
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
         assert!(messages[1].content.contains("Recent conversation window"));
-        assert!(messages[2].content.contains("Platform Overview [global]"));
-        assert!(messages[3]
+        assert!(messages[2]
+            .content
+            .contains("Platform Overview [Global/global]"));
+        assert!(messages[3].content.contains("Effective session skills"));
+        assert!(messages[4]
             .content
             .contains("provider=Moonshot, model=kimi-k2.5"));
-        assert_eq!(messages[4].role, "user");
-        assert_eq!(messages[4].content, "What model are you using?");
+        assert_eq!(messages[5].role, "user");
+        assert_eq!(messages[5].content, "What model are you using?");
     }
 }

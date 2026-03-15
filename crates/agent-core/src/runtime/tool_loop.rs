@@ -3,8 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     core::AgentCore,
-    domain::{MemorySearchHit, MessageRecord},
+    domain::{MemorySearchHit, MessageRecord, PlanStepKind},
     error::{CoreError, CoreResult},
+    memory::summarize_text,
     runtime::ProviderSelection,
 };
 
@@ -30,6 +31,8 @@ impl AgentCore {
         selection: &ProviderSelection,
         recent_messages: &[MessageRecord],
         memory_hits: &[MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
         session_id: Uuid,
         run_id: Uuid,
@@ -52,6 +55,8 @@ impl AgentCore {
                     Some(selection),
                     recent_messages,
                     memory_hits,
+                    effective_skill_names,
+                    pinned_skill_names,
                     &loop_prompt,
                     providers_count,
                 )
@@ -67,6 +72,16 @@ impl AgentCore {
                     tool_name,
                     arguments,
                 } => {
+                    let tool_step = self
+                        .store
+                        .start_run_step(
+                            run_id,
+                            None,
+                            PlanStepKind::Tool,
+                            format!("Invoke tool {tool_name}"),
+                            summarize_text(&arguments.to_string(), 24),
+                        )
+                        .await?;
                     self.publish_event(
                         "tool.call.started",
                         run_id,
@@ -75,22 +90,70 @@ impl AgentCore {
                             "toolName": tool_name,
                             "arguments": arguments
                         }),
-                    );
+                    )
+                    .await;
 
-                    let result = match self
+                    let (result_json, ok, error, extra_artifacts) = match self
                         .tool_registry
                         .execute(session_id, &tool_name, arguments.clone())
                         .await
                     {
-                        Ok(result) => json!({
-                            "ok": result.ok,
-                            "payload": result.payload
-                        }),
-                        Err(error) => json!({
-                            "ok": false,
-                            "error": error.message
-                        }),
+                        Ok(result) => (
+                            json!({
+                                "ok": result.ok,
+                                "payload": result.payload
+                            }),
+                            true,
+                            None,
+                            result.artifacts,
+                        ),
+                        Err(error) => (
+                            json!({
+                                "ok": false,
+                                "error": error.message
+                            }),
+                            false,
+                            Some(error.message),
+                            Vec::new(),
+                        ),
                     };
+                    let invocation = self
+                        .store
+                        .record_tool_invocation(
+                            tool_step.id,
+                            tool_name.clone(),
+                            "local".to_string(),
+                            arguments.clone(),
+                            result_json.clone(),
+                            ok,
+                            error.clone(),
+                        )
+                        .await?;
+                    self.write_tool_invocation_artifacts(
+                        session_id,
+                        tool_step.task_id,
+                        run_id,
+                        &invocation,
+                        &extra_artifacts,
+                    )
+                    .await?;
+                    if ok {
+                        self.store
+                            .complete_run_step(
+                                tool_step.id,
+                                summarize_text(&result_json.to_string(), 24),
+                            )
+                            .await?;
+                    } else {
+                        self.store
+                            .fail_run_step(
+                                tool_step.id,
+                                error
+                                    .clone()
+                                    .unwrap_or_else(|| "tool execution failed".to_string()),
+                            )
+                            .await?;
+                    }
 
                     self.publish_event(
                         "tool.call.completed",
@@ -98,14 +161,15 @@ impl AgentCore {
                         session_id,
                         json!({
                             "toolName": tool_name,
-                            "result": result
+                            "result": result_json
                         }),
-                    );
+                    )
+                    .await;
 
                     transcript.push(ToolLoopEntry {
                         tool_name,
                         arguments,
-                        result,
+                        result: result_json,
                     });
                 }
             }
@@ -254,6 +318,7 @@ mod tests {
 
     use serde_json::Value;
 
+    use crate::domain::{CreateSessionRequest, PlanStepKind, PostMessageRequest, RunStepStatus};
     use crate::test_support::{
         create_test_core_with_openrouter_transport, moonshot_provider_config_toml,
         runtime_test_lock, EnvVarGuard, TestOpenRouterOutcome, TestOpenRouterResponse,
@@ -317,15 +382,33 @@ mod tests {
         let selection = core
             .select_provider_model(&providers)
             .expect("select provider");
+        let session = core
+            .create_session(CreateSessionRequest {
+                title: Some("Tool Loop Test".to_string()),
+            })
+            .await
+            .expect("create session");
+        let accepted = core
+            .store
+            .enqueue_user_message(
+                session.id,
+                PostMessageRequest {
+                    content: "Read note.txt and finish.".to_string(),
+                },
+            )
+            .await
+            .expect("enqueue message");
 
         let response = core
             .run_tool_loop(
                 &selection,
                 &[],
                 &[],
+                &[],
+                &[],
                 "Read note.txt and finish.",
-                uuid::Uuid::new_v4(),
-                uuid::Uuid::new_v4(),
+                session.id,
+                accepted.run.id,
                 providers.len(),
             )
             .await
@@ -336,10 +419,133 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let second_request: Value =
             serde_json::from_slice(&requests[1].body).expect("decode second request");
-        let prompt = second_request["messages"][3]["content"]
-            .as_str()
+        let prompt = second_request["messages"]
+            .as_array()
+            .expect("request messages")
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .find(|content| content.contains("\"toolName\": \"read_file\""))
             .expect("tool loop prompt");
         assert!(prompt.contains("\"toolName\": \"read_file\""));
         assert!(prompt.contains("\"content\": \"tool loop smoke"));
+
+        let run_steps = core
+            .list_run_steps(accepted.run.id)
+            .await
+            .expect("list run steps");
+        assert!(run_steps.iter().any(|step| {
+            step.kind == PlanStepKind::Tool && matches!(step.status, RunStepStatus::Completed)
+        }));
+
+        let invocations = core
+            .list_tool_invocations(accepted.run.id)
+            .await
+            .expect("list tool invocations");
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].tool_name, "read_file");
+        assert_eq!(invocations[0].arguments_json["path"], "note.txt");
+        assert_eq!(invocations[0].result_json["ok"], true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_tool_loop_persists_tool_artifacts_into_session_workspace() {
+        let _lock = runtime_test_lock().lock().expect("lock runtime test");
+        let temp_root =
+            std::env::temp_dir().join(format!("asuka-tool-artifacts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp workspace");
+
+        let _workspace_root = EnvVarGuard::set(
+            "ASUKA_WORKSPACE_ROOT",
+            temp_root.to_str().expect("temp root path"),
+        );
+        let _moonshot_key = EnvVarGuard::set("MOONSHOT_API_KEY", "test-key");
+        let transport = TestOpenRouterTransport::new(vec![
+            TestOpenRouterOutcome::Response(TestOpenRouterResponse::json(
+                200,
+                r##"{"choices":[{"message":{"content":"{\"type\":\"tool\",\"tool\":\"write_file\",\"arguments\":{\"path\":\"notes/tool-output.md\",\"content\":\"# Tool Output\\n\\nPersisted during tool execution.\\n\"}}"}}]}"##,
+            )),
+            TestOpenRouterOutcome::Response(TestOpenRouterResponse::json(
+                200,
+                r##"{"choices":[{"message":{"content":"{\"type\":\"final\",\"content\":\"done after write\"}"}}]}"##,
+            )),
+        ]);
+        let core = create_test_core_with_openrouter_transport(
+            moonshot_provider_config_toml(),
+            Arc::clone(&transport),
+        );
+
+        let providers = core.list_providers().await.expect("list providers");
+        let selection = core
+            .select_provider_model(&providers)
+            .expect("select provider");
+        let session = core
+            .create_session(CreateSessionRequest {
+                title: Some("Tool Artifact Test".to_string()),
+            })
+            .await
+            .expect("create session");
+        let accepted = core
+            .store
+            .enqueue_user_message(
+                session.id,
+                PostMessageRequest {
+                    content: "Write a markdown note and finish.".to_string(),
+                },
+            )
+            .await
+            .expect("enqueue message");
+
+        let response = core
+            .run_tool_loop(
+                &selection,
+                &[],
+                &[],
+                &[],
+                &[],
+                "Write a markdown note and finish.",
+                session.id,
+                accepted.run.id,
+                providers.len(),
+            )
+            .await
+            .expect("tool loop response");
+
+        assert_eq!(response, "done after write");
+        let artifacts = core
+            .list_run_artifacts(accepted.run.id)
+            .await
+            .expect("list run artifacts");
+        let result_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.path.ends_with("/result.json"))
+            .expect("tool result artifact");
+        let snapshot_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .path
+                    .ends_with("/outputs/workspace/notes/tool-output.md")
+            })
+            .expect("workspace snapshot artifact");
+        assert_eq!(
+            snapshot_artifact.producer_ref_id,
+            result_artifact.producer_ref_id
+        );
+
+        let snapshot = core
+            .read_session_workspace_file(session.id, &snapshot_artifact.path)
+            .await
+            .expect("read snapshot artifact");
+        let snapshot_text = String::from_utf8(snapshot).expect("decode snapshot artifact");
+        assert!(snapshot_text.contains("# Tool Output"));
+        assert!(snapshot_text.contains("Persisted during tool execution."));
+
+        let result = core
+            .read_session_workspace_file(session.id, &result_artifact.path)
+            .await
+            .expect("read result artifact");
+        let result_text = String::from_utf8(result).expect("decode result artifact");
+        assert!(result_text.contains("\"toolName\": \"write_file\""));
+        assert!(result_text.contains("\"path\": \"notes/tool-output.md\""));
     }
 }

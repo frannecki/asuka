@@ -55,14 +55,11 @@ impl Tool for GlobTool {
         }
         paths.sort();
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "pattern": pattern,
-                "matches": paths,
-                "truncated": truncated
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "pattern": pattern,
+            "matches": paths,
+            "truncated": truncated
+        })))
     }
 }
 

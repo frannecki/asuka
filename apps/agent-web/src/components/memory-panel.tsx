@@ -12,15 +12,20 @@ import {
 import type {
   MemoryDocumentDetail,
   MemoryDocumentRecord,
+  MemoryScope,
   MemorySearchHit,
 } from "@/lib/types";
 
 export function MemoryPanel() {
   const [documents, setDocuments] = useState<MemoryDocumentRecord[]>([]);
   const [title, setTitle] = useState("");
-  const [namespace, setNamespace] = useState("global");
+  const [namespace, setNamespace] = useState("knowledge");
+  const [memoryScope, setMemoryScope] = useState<MemoryScope>("project");
+  const [ownerSessionId, setOwnerSessionId] = useState("");
   const [content, setContent] = useState("");
   const [query, setQuery] = useState("");
+  const [searchScope, setSearchScope] = useState<"all" | MemoryScope>("all");
+  const [searchOwnerSessionId, setSearchOwnerSessionId] = useState("");
   const [hits, setHits] = useState<MemorySearchHit[]>([]);
   const [selected, setSelected] = useState<MemoryDocumentDetail | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -44,18 +49,27 @@ export function MemoryPanel() {
     const created = await createMemoryDocument({
       title,
       namespace,
+      memoryScope,
+      ownerSessionId: ownerSessionId || null,
       content,
       source: "manual",
     });
     setDocuments((current) => [created, ...current]);
     setTitle("");
     setContent("");
+    setOwnerSessionId("");
     setFeedback(`Created memory document ${created.title}.`);
   }
 
   async function handleSearch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = await searchMemory({ query, namespace, limit: 6 });
+    const result = await searchMemory({
+      query,
+      namespace,
+      memoryScopes: searchScope === "all" ? undefined : [searchScope],
+      ownerSessionId: searchOwnerSessionId || null,
+      limit: 6,
+    });
     setHits(result.hits);
   }
 
@@ -100,6 +114,27 @@ export function MemoryPanel() {
             />
           </label>
           <label>
+            Scope
+            <select
+              className="text-input"
+              onChange={(event) => setMemoryScope(event.target.value as MemoryScope)}
+              value={memoryScope}
+            >
+              <option value="project">project</option>
+              <option value="global">global</option>
+              <option value="session">session</option>
+            </select>
+          </label>
+          <label>
+            Owner session ID
+            <input
+              className="text-input"
+              onChange={(event) => setOwnerSessionId(event.target.value)}
+              placeholder="Required for session scope"
+              value={ownerSessionId}
+            />
+          </label>
+          <label>
             Content
             <textarea
               className="text-input"
@@ -122,6 +157,30 @@ export function MemoryPanel() {
               value={query}
             />
           </label>
+          <label>
+            Search scope
+            <select
+              className="text-input"
+              onChange={(event) =>
+                setSearchScope(event.target.value as "all" | MemoryScope)
+              }
+              value={searchScope}
+            >
+              <option value="all">all</option>
+              <option value="project">project</option>
+              <option value="global">global</option>
+              <option value="session">session</option>
+            </select>
+          </label>
+          <label>
+            Search owner session ID
+            <input
+              className="text-input"
+              onChange={(event) => setSearchOwnerSessionId(event.target.value)}
+              placeholder="Optional session filter"
+              value={searchOwnerSessionId}
+            />
+          </label>
           <button className="ghost-button" type="submit">
             Search memory
           </button>
@@ -137,7 +196,10 @@ export function MemoryPanel() {
                   <strong>{hit.documentTitle}</strong>
                   <span>{hit.score.toFixed(2)}</span>
                 </div>
-                <p className="hint-copy">{hit.namespace}</p>
+                <p className="hint-copy">
+                  {hit.memoryScope} · {hit.namespace}
+                  {hit.ownerSessionId ? ` · ${hit.ownerSessionId}` : ""}
+                </p>
                 <p>{hit.content}</p>
               </article>
             ))}
@@ -163,7 +225,7 @@ export function MemoryPanel() {
             >
               <strong>{document.title}</strong>
               <span>
-                {document.namespace} · {document.chunkCount} chunks
+                {document.memoryScope} · {document.namespace} · {document.chunkCount} chunks
               </span>
               <span>{document.summary}</span>
             </button>
@@ -182,8 +244,12 @@ export function MemoryPanel() {
         {selected ? (
           <div className="stack-gap">
             <p className="hint-copy">
-              {selected.document.namespace} · {selected.document.source}
+              {selected.document.memoryScope} · {selected.document.namespace} ·{" "}
+              {selected.document.source}
             </p>
+            {selected.document.ownerSessionId ? (
+              <p className="hint-copy">owner session: {selected.document.ownerSessionId}</p>
+            ) : null}
             <p>{selected.document.content}</p>
             <div className="stack-gap">
               {selected.chunks.map((chunk) => (

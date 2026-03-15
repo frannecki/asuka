@@ -92,6 +92,8 @@ impl AgentCore {
         selection: &ProviderSelection,
         recent_messages: &[MessageRecord],
         memory_hits: &[MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
     ) -> CoreResult<String> {
         let api_key_env = selection
@@ -107,6 +109,8 @@ impl AgentCore {
                 selection,
                 recent_messages,
                 memory_hits,
+                effective_skill_names,
+                pinned_skill_names,
                 user_content,
             ),
             temperature: 0.2,
@@ -148,6 +152,8 @@ impl AgentCore {
         selection: Option<&ProviderSelection>,
         recent_messages: &[MessageRecord],
         memory_hits: &[MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
         providers_count: usize,
     ) -> CoreResult<String> {
@@ -165,12 +171,26 @@ impl AgentCore {
 
         match selection.provider_type {
             ProviderType::Moonshot => {
-                self.invoke_moonshot(selection, recent_messages, memory_hits, user_content)
-                    .await
+                self.invoke_moonshot(
+                    selection,
+                    recent_messages,
+                    memory_hits,
+                    effective_skill_names,
+                    pinned_skill_names,
+                    user_content,
+                )
+                .await
             }
             ProviderType::OpenRouter => {
-                self.invoke_openrouter(selection, recent_messages, memory_hits, user_content)
-                    .await
+                self.invoke_openrouter(
+                    selection,
+                    recent_messages,
+                    memory_hits,
+                    effective_skill_names,
+                    pinned_skill_names,
+                    user_content,
+                )
+                .await
             }
             _ => Ok(crate::runtime::fallback_response(
                 Some(selection),
@@ -212,7 +232,7 @@ mod tests {
             .expect("select provider");
 
         let response = core
-            .invoke_openrouter(&selection, &[], &[], "Explain provider routing")
+            .invoke_openrouter(&selection, &[], &[], &[], &[], "Explain provider routing")
             .await
             .expect("provider response");
 
@@ -243,7 +263,7 @@ mod tests {
             .expect("select provider");
 
         let error = core
-            .invoke_openrouter(&selection, &[], &[], "Explain provider routing")
+            .invoke_openrouter(&selection, &[], &[], &[], &[], "Explain provider routing")
             .await
             .expect_err("upstream error");
 

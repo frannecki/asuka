@@ -1,7 +1,8 @@
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use async_trait::async_trait;
-use rusqlite::Connection;
+use diesel::{connection::SimpleConnection, prelude::*, sqlite::SqliteConnection};
+use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -14,8 +15,9 @@ use crate::{
 };
 
 use super::{
-    helpers::{query_json_records, sqlite_error},
+    helpers::{load_json_records, sqlite_error},
     schema,
+    tables::{agent_memory_chunks, agent_memory_documents},
 };
 
 pub struct SqliteStore {
@@ -67,8 +69,8 @@ impl SqliteStore {
     }
 
     fn init_schema(&self) -> CoreResult<()> {
-        let connection = self.open_connection()?;
-        schema::init_schema(&connection)
+        let mut connection = self.open_connection()?;
+        schema::init_schema(&mut connection)
     }
 
     fn seed_defaults(&self, config: &ModelsConfig) -> CoreResult<()> {
@@ -76,15 +78,14 @@ impl SqliteStore {
         schema::seed_defaults(&mut connection, config)
     }
 
-    pub(super) fn open_connection(&self) -> CoreResult<Connection> {
-        let connection = Connection::open(&self.db_path)
+    pub(super) fn open_connection(&self) -> CoreResult<SqliteConnection> {
+        let db_path = self.db_path.to_string_lossy().to_string();
+        let mut connection = SqliteConnection::establish(&db_path)
             .map_err(|error| sqlite_error("open sqlite database", error))?;
         connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| sqlite_error("set sqlite busy timeout", error))?;
-        connection
-            .execute_batch(
+            .batch_execute(
                 r#"
+                PRAGMA busy_timeout = 5000;
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
@@ -110,17 +111,17 @@ impl SqliteStore {
     }
 
     pub(super) fn load_memory_state(&self) -> CoreResult<StoreState> {
-        let connection = self.open_connection()?;
-        let documents = query_json_records::<MemoryDocumentRecord, _>(
-            &connection,
-            "SELECT data FROM agent_memory_documents",
-            [],
+        let mut connection = self.open_connection()?;
+        let documents = load_json_records::<MemoryDocumentRecord, _>(
+            &mut connection,
+            agent_memory_documents::table.select(agent_memory_documents::data),
             "memory document",
         )?;
-        let chunks = query_json_records::<MemoryChunkRecord, _>(
-            &connection,
-            "SELECT data FROM agent_memory_chunks ORDER BY ordinal ASC",
-            [],
+        let chunks = load_json_records::<MemoryChunkRecord, _>(
+            &mut connection,
+            agent_memory_chunks::table
+                .order(agent_memory_chunks::ordinal.asc())
+                .select(agent_memory_chunks::data),
             "memory chunk",
         )?;
 
@@ -138,22 +139,46 @@ impl SqliteStore {
         &self,
         query: &str,
         namespace: Option<&str>,
+        memory_scopes: Option<&[MemoryScope]>,
+        owner_session_id: Option<Uuid>,
         limit: usize,
     ) -> CoreResult<Option<Vec<MemorySearchHit>>> {
         let Some(chroma) = &self.chroma else {
             return Ok(None);
         };
 
-        match chroma.query(query, namespace, limit).await {
-            Ok(hits) => Ok(Some(hits)),
-            Err(error) => {
-                warn!(
-                    "chroma query failed; memory retrieval is falling back to lexical search: {}",
-                    error.message
-                );
-                Ok(None)
-            }
+        let requested_scopes = memory_scopes
+            .map(|scopes| scopes.to_vec())
+            .unwrap_or_else(|| {
+                vec![
+                    MemoryScope::Session,
+                    MemoryScope::Project,
+                    MemoryScope::Global,
+                ]
+            });
+
+        let mut hit_sets = Vec::new();
+        for scope in requested_scopes {
+            let scoped_owner_session = matches!(scope, MemoryScope::Session)
+                .then_some(owner_session_id)
+                .flatten();
+            let hits = match chroma
+                .query(query, namespace, Some(&scope), scoped_owner_session, limit)
+                .await
+            {
+                Ok(hits) => hits,
+                Err(error) => {
+                    warn!(
+                        "chroma query failed; memory retrieval is falling back to lexical search: {}",
+                        error.message
+                    );
+                    return Ok(None);
+                }
+            };
+            hit_sets.push(hits);
         }
+
+        Ok(Some(crate::memory::merge_memory_hits(hit_sets, limit)))
     }
 }
 
@@ -195,6 +220,10 @@ impl AgentStore for SqliteStore {
         self.enqueue_user_message_db(session_id, payload).await
     }
 
+    async fn get_active_run(&self, session_id: Uuid) -> CoreResult<Option<RunRecord>> {
+        self.get_active_run_db(session_id).await
+    }
+
     async fn get_run(&self, run_id: Uuid) -> CoreResult<RunRecord> {
         self.get_run_db(run_id).await
     }
@@ -209,6 +238,18 @@ impl AgentStore for SqliteStore {
 
     async fn run_is_active(&self, run_id: Uuid) -> bool {
         self.run_is_active_db(run_id).await
+    }
+
+    async fn list_run_events(
+        &self,
+        run_id: Uuid,
+        after_sequence: Option<u64>,
+    ) -> CoreResult<Vec<RunEventEnvelope>> {
+        self.list_run_events_db(run_id, after_sequence).await
+    }
+
+    async fn append_run_event(&self, event: RunEventEnvelope) -> CoreResult<()> {
+        self.append_run_event_db(event).await
     }
 
     async fn set_run_selection(
@@ -239,12 +280,100 @@ impl AgentStore for SqliteStore {
             .await
     }
 
+    async fn list_tasks(&self, session_id: Option<Uuid>) -> CoreResult<Vec<TaskRecord>> {
+        self.list_tasks_db(session_id).await
+    }
+
+    async fn get_task(&self, task_id: Uuid) -> CoreResult<TaskRecord> {
+        self.get_task_db(task_id).await
+    }
+
+    async fn get_task_plan(&self, task_id: Uuid) -> CoreResult<PlanDetail> {
+        self.get_task_plan_db(task_id).await
+    }
+
+    async fn list_task_runs(&self, task_id: Uuid) -> CoreResult<Vec<RunRecord>> {
+        self.list_task_runs_db(task_id).await
+    }
+
+    async fn list_session_artifacts(&self, session_id: Uuid) -> CoreResult<Vec<ArtifactRecord>> {
+        self.list_session_artifacts_db(session_id).await
+    }
+
+    async fn list_task_artifacts(&self, task_id: Uuid) -> CoreResult<Vec<ArtifactRecord>> {
+        self.list_task_artifacts_db(task_id).await
+    }
+
+    async fn list_run_artifacts(&self, run_id: Uuid) -> CoreResult<Vec<ArtifactRecord>> {
+        self.list_run_artifacts_db(run_id).await
+    }
+
+    async fn upsert_artifact(&self, artifact: ArtifactRecord) -> CoreResult<ArtifactRecord> {
+        self.upsert_artifact_db(artifact).await
+    }
+
+    async fn list_run_steps(&self, run_id: Uuid) -> CoreResult<Vec<RunStepRecord>> {
+        self.list_run_steps_db(run_id).await
+    }
+
+    async fn start_run_step(
+        &self,
+        run_id: Uuid,
+        plan_step_id: Option<Uuid>,
+        kind: PlanStepKind,
+        title: String,
+        input_summary: String,
+    ) -> CoreResult<RunStepRecord> {
+        self.start_run_step_db(run_id, plan_step_id, kind, title, input_summary)
+            .await
+    }
+
+    async fn complete_run_step(
+        &self,
+        run_step_id: Uuid,
+        output_summary: String,
+    ) -> CoreResult<RunStepRecord> {
+        self.complete_run_step_db(run_step_id, output_summary).await
+    }
+
+    async fn fail_run_step(&self, run_step_id: Uuid, error: String) -> CoreResult<RunStepRecord> {
+        self.fail_run_step_db(run_step_id, error).await
+    }
+
+    async fn list_tool_invocations(&self, run_id: Uuid) -> CoreResult<Vec<ToolInvocationRecord>> {
+        self.list_tool_invocations_db(run_id).await
+    }
+
+    async fn record_tool_invocation(
+        &self,
+        run_step_id: Uuid,
+        tool_name: String,
+        tool_source: String,
+        arguments_json: Value,
+        result_json: Value,
+        ok: bool,
+        error: Option<String>,
+    ) -> CoreResult<ToolInvocationRecord> {
+        self.record_tool_invocation_db(
+            run_step_id,
+            tool_name,
+            tool_source,
+            arguments_json,
+            result_json,
+            ok,
+            error,
+        )
+        .await
+    }
+
     async fn write_run_memory_note(
         &self,
+        session_id: Uuid,
         user_content: &str,
         response: &str,
     ) -> CoreResult<MemoryDocumentRecord> {
-        self.write_run_memory_note_db(user_content, response).await
+        self.write_run_memory_note_db(session_id, user_content, response)
+            .await
     }
 
     async fn list_skills(&self) -> CoreResult<Vec<SkillRecord>> {
@@ -261,6 +390,41 @@ impl AgentStore for SqliteStore {
         payload: UpdateSkillRequest,
     ) -> CoreResult<SkillRecord> {
         self.update_skill_db(skill_id, payload).await
+    }
+
+    async fn list_skill_presets(&self) -> CoreResult<Vec<SkillPreset>> {
+        self.list_skill_presets_db().await
+    }
+
+    async fn get_session_skills(&self, session_id: Uuid) -> CoreResult<SessionSkillsDetail> {
+        self.get_session_skills_db(session_id).await
+    }
+
+    async fn replace_session_skills(
+        &self,
+        session_id: Uuid,
+        detail: SessionSkillsDetail,
+    ) -> CoreResult<SessionSkillsDetail> {
+        self.replace_session_skills_db(session_id, detail).await
+    }
+
+    async fn update_session_skill_binding(
+        &self,
+        session_id: Uuid,
+        skill_id: Uuid,
+        payload: UpdateSessionSkillBindingRequest,
+    ) -> CoreResult<SessionSkillsDetail> {
+        self.update_session_skill_binding_db(session_id, skill_id, payload)
+            .await
+    }
+
+    async fn apply_session_skill_preset(
+        &self,
+        session_id: Uuid,
+        preset_id: String,
+    ) -> CoreResult<SessionSkillsDetail> {
+        self.apply_session_skill_preset_db(session_id, preset_id)
+            .await
     }
 
     async fn list_subagents(&self) -> CoreResult<Vec<SubagentRecord>> {
@@ -332,6 +496,18 @@ impl AgentStore for SqliteStore {
         payload: CreateMemoryDocumentRequest,
     ) -> CoreResult<MemoryDocumentRecord> {
         self.create_memory_document_db(payload).await
+    }
+
+    async fn update_memory_document(
+        &self,
+        document_id: Uuid,
+        payload: UpdateMemoryDocumentRequest,
+    ) -> CoreResult<MemoryDocumentRecord> {
+        self.update_memory_document_db(document_id, payload).await
+    }
+
+    async fn delete_memory_document(&self, document_id: Uuid) -> CoreResult<()> {
+        self.delete_memory_document_db(document_id).await
     }
 
     async fn get_memory_document(&self, document_id: Uuid) -> CoreResult<MemoryDocumentDetail> {

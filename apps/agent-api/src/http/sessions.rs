@@ -1,6 +1,6 @@
 use agent_core::{
-    CreateSessionRequest, MessageRecord, PostMessageRequest, RunAccepted, SessionDetail,
-    SessionRecord, UpdateSessionRequest,
+    ActiveRunEnvelope, CreateSessionRequest, MessageRecord, PostMessageRequest, RunAccepted,
+    SessionDetail, SessionRecord, UpdateSessionRequest,
 };
 use axum::{
     extract::{Path, State},
@@ -28,6 +28,7 @@ pub fn router() -> Router<ApiState> {
             "/sessions/:session_id/messages",
             get(list_messages).post(post_message),
         )
+        .route("/sessions/:session_id/active-run", get(get_active_run))
 }
 
 async fn list_sessions(State(state): State<ApiState>) -> ApiResult<Vec<SessionRecord>> {
@@ -77,4 +78,11 @@ async fn post_message(
     Json(payload): Json<PostMessageRequest>,
 ) -> ApiResult<RunAccepted> {
     Ok(Json(state.core.post_message(session_id, payload).await?))
+}
+
+async fn get_active_run(
+    State(state): State<ApiState>,
+    Path(session_id): Path<Uuid>,
+) -> ApiResult<ActiveRunEnvelope> {
+    Ok(Json(state.core.get_active_run(session_id).await?))
 }

@@ -4,7 +4,10 @@ use tokio::fs;
 
 use crate::{
     error::{CoreError, CoreResult},
-    tools::types::{Tool, ToolContext, ToolDescriptor, ToolResult},
+    tools::{
+        files::workspace_file_artifact,
+        types::{Tool, ToolContext, ToolDescriptor, ToolResult},
+    },
 };
 
 use super::files::{display_relative_path, resolve_workspace_path};
@@ -100,14 +103,17 @@ impl Tool for WriteTodosTool {
             CoreError::bad_request(format!("failed to write todo file {}: {error}", path))
         })?;
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "content": content,
-                "itemsWritten": items.len()
-            }),
-        })
+        let relative_path = display_relative_path(&ctx.workspace_root, &target);
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "content": content,
+            "itemsWritten": items.len()
+        }))
+        .with_artifacts(vec![workspace_file_artifact(
+            &relative_path,
+            "session-todos.md",
+            &content,
+        )]))
     }
 }
 
@@ -137,13 +143,10 @@ impl Tool for ReadTodosTool {
             CoreError::bad_request(format!("failed to read todo file {path}: {error}"))
         })?;
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "content": content
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "content": content
+        })))
     }
 }
 

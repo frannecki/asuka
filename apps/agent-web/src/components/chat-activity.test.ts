@@ -53,15 +53,23 @@ test("describeRunEvent renders model fallback and memory retrieval summaries", (
   const memory = describeRunEvent(
     makeRunEvent("memory.retrieved", {
       hits: [
-        { documentTitle: "Platform Overview", namespace: "global" },
-        { documentTitle: "Provider Policy", namespace: "global" },
+        {
+          documentTitle: "Platform Overview",
+          namespace: "global",
+          memoryScope: "global",
+        },
+        {
+          documentTitle: "Provider Policy",
+          namespace: "global",
+          memoryScope: "project",
+        },
       ],
     }),
   );
   assert.equal(memory.badge, "memory");
   assert.equal(memory.summary, "2 relevant chunks found");
-  assert.match(memory.detail ?? "", /Platform Overview \[global\]/);
-  assert.match(memory.detail ?? "", /Provider Policy \[global\]/);
+  assert.match(memory.detail ?? "", /Platform Overview \[global\/global\]/);
+  assert.match(memory.detail ?? "", /Provider Policy \[project\/global\]/);
 });
 
 test("formatActivityPayload preserves readable JSON formatting", () => {

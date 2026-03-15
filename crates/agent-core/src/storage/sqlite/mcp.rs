@@ -1,21 +1,23 @@
 use chrono::Utc;
-use rusqlite::params;
+use diesel::prelude::*;
 use uuid::Uuid;
 
 use crate::{domain::*, error::CoreResult};
 
 use super::{
-    helpers::{get_json_record_by_id, query_json_records, serialize_record, sqlite_error},
+    helpers::{load_json_record, load_json_records, serialize_record, sqlite_error},
     store::SqliteStore,
+    tables::agent_mcp_servers,
 };
 
 impl SqliteStore {
     pub(super) async fn list_mcp_servers_db(&self) -> CoreResult<Vec<McpServerRecord>> {
-        let connection = self.open_connection()?;
-        query_json_records(
-            &connection,
-            "SELECT data FROM agent_mcp_servers ORDER BY updated_at DESC",
-            [],
+        let mut connection = self.open_connection()?;
+        load_json_records(
+            &mut connection,
+            agent_mcp_servers::table
+                .order(agent_mcp_servers::updated_at.desc())
+                .select(agent_mcp_servers::data),
             "mcp server",
         )
     }
@@ -35,28 +37,28 @@ impl SqliteStore {
             updated_at: Utc::now(),
         };
 
-        let connection = self.open_connection()?;
-        let data = serialize_record(&server, "mcp server")?;
-        connection
-            .execute(
-                r#"
-                INSERT INTO agent_mcp_servers (id, name, updated_at, data)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                params![
-                    server.id.to_string(),
-                    server.name,
-                    server.updated_at.to_rfc3339(),
-                    data
-                ],
-            )
+        let mut connection = self.open_connection()?;
+        diesel::insert_into(agent_mcp_servers::table)
+            .values((
+                agent_mcp_servers::id.eq(server.id.to_string()),
+                agent_mcp_servers::name.eq(server.name.clone()),
+                agent_mcp_servers::updated_at.eq(server.updated_at.to_rfc3339()),
+                agent_mcp_servers::data.eq(serialize_record(&server, "mcp server")?),
+            ))
+            .execute(&mut connection)
             .map_err(|error| sqlite_error("insert mcp server", error))?;
         Ok(server)
     }
 
     pub(super) async fn get_mcp_server_db(&self, server_id: Uuid) -> CoreResult<McpServerRecord> {
-        let connection = self.open_connection()?;
-        get_json_record_by_id(&connection, "agent_mcp_servers", server_id, "mcp server")
+        let mut connection = self.open_connection()?;
+        load_json_record(
+            &mut connection,
+            agent_mcp_servers::table
+                .filter(agent_mcp_servers::id.eq(server_id.to_string()))
+                .select(agent_mcp_servers::data),
+            "mcp server",
+        )
     }
 
     pub(super) async fn test_mcp_server_db(&self, server_id: Uuid) -> CoreResult<TestResult> {

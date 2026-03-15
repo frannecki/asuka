@@ -15,7 +15,8 @@ impl AgentCore {
                 "status": "failed",
                 "message": message
             }),
-        );
+        )
+        .await;
     }
 
     pub(crate) async fn run_is_active(&self, run_id: Uuid) -> bool {

@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    domain::MemorySearchHit,
+    domain::{MemoryScope, MemorySearchHit},
     error::{CoreError, CoreResult},
 };
 
@@ -190,8 +190,11 @@ impl ChromaClient {
         &self,
         query: &str,
         namespace: Option<&str>,
+        memory_scope: Option<&MemoryScope>,
+        owner_session_id: Option<Uuid>,
         limit: usize,
     ) -> CoreResult<Vec<MemorySearchHit>> {
+        let where_filter = build_where_filter(namespace, memory_scope, owner_session_id);
         let payload = ChromaQueryRequest {
             query_embeddings: vec![embed_text(query)],
             n_results: limit.max(1),
@@ -200,7 +203,7 @@ impl ChromaClient {
                 "metadatas".to_string(),
                 "distances".to_string(),
             ],
-            r#where: namespace.map(|value| json!({ "namespace": { "$eq": value } })),
+            r#where: where_filter,
         };
 
         let (status, body) = self
@@ -264,12 +267,27 @@ impl ChromaClient {
                 .and_then(|value| value.as_str())
                 .unwrap_or("global")
                 .to_string();
+            let memory_scope = match metadata
+                .get("memory_scope")
+                .and_then(|value| value.as_str())
+                .unwrap_or("global")
+            {
+                "session" => MemoryScope::Session,
+                "project" => MemoryScope::Project,
+                _ => MemoryScope::Global,
+            };
+            let owner_session_id = metadata
+                .get("owner_session_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| Uuid::parse_str(value).ok());
 
             hits.push(MemorySearchHit {
                 document_id,
                 chunk_id,
                 document_title,
                 namespace,
+                memory_scope,
+                owner_session_id,
                 content: document,
                 score: 1.0 / (1.0 + distance.abs()),
             });
@@ -324,5 +342,36 @@ impl ChromaClient {
             CoreError::new(502, format!("failed to read chroma response: {error}"))
         })?;
         Ok((status, bytes.to_vec()))
+    }
+}
+
+fn build_where_filter(
+    namespace: Option<&str>,
+    memory_scope: Option<&MemoryScope>,
+    owner_session_id: Option<Uuid>,
+) -> Option<Value> {
+    let mut clauses = Vec::new();
+    if let Some(namespace) = namespace {
+        clauses.push(json!({ "namespace": { "$eq": namespace } }));
+    }
+
+    match (memory_scope, owner_session_id) {
+        (Some(MemoryScope::Session), Some(session_id)) => clauses.push(json!({
+            "scope_owner_key": { "$eq": format!("session:{session_id}") }
+        })),
+        (Some(scope), _) => clauses.push(json!({
+            "memory_scope": { "$eq": match scope {
+                MemoryScope::Session => "session",
+                MemoryScope::Project => "project",
+                MemoryScope::Global => "global",
+            }}
+        })),
+        (None, _) => {}
+    }
+
+    match clauses.len() {
+        0 => None,
+        1 => clauses.into_iter().next(),
+        _ => Some(json!({ "$and": clauses })),
     }
 }
