@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::SessionStatus;
+use super::{RunRecord, SessionSkillSummary, SessionStatus, StreamCheckpointSummary, TaskRecord};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +22,11 @@ pub struct SessionRecord {
 pub struct SessionDetail {
     pub session: SessionRecord,
     pub messages: Vec<MessageRecord>,
+    pub skill_summary: SessionSkillSummary,
+    pub active_run_summary: Option<RunRecord>,
+    pub latest_run_summary: Option<RunRecord>,
+    pub active_task_summary: Option<TaskRecord>,
+    pub latest_stream_checkpoint_summary: Option<StreamCheckpointSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

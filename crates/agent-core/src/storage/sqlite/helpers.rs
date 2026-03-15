@@ -1,201 +1,109 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use diesel::{prelude::*, query_dsl::LoadQuery, sqlite::SqliteConnection, RunQueryDsl};
 use serde::{de::DeserializeOwned, Serialize};
-use uuid::Uuid;
 
 use crate::{
-    domain::{MemoryChunkRecord, MemoryDocumentRecord, RunRecord},
+    domain::{MemoryChunkRecord, MemoryDocumentRecord},
     error::{CoreError, CoreResult},
     memory::chunk_memory_document,
 };
 
+use super::tables::{agent_memory_chunks, agent_memory_documents};
+
 pub(super) fn insert_memory_document_and_chunks_sqlite(
-    connection: &Connection,
+    connection: &mut SqliteConnection,
     document: &MemoryDocumentRecord,
 ) -> CoreResult<MemoryDocumentRecord> {
     let mut document = document.clone();
     let chunks = chunk_memory_document(&document);
     document.chunk_count = chunks.len();
 
-    let data = serialize_record(&document, "memory document")?;
-    connection
-        .execute(
-            r#"
-            INSERT INTO agent_memory_documents
-                (id, namespace, source, title, created_at, updated_at, data)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                document.id.to_string(),
-                document.namespace,
-                document.source,
-                document.title,
-                document.created_at.to_rfc3339(),
-                document.updated_at.to_rfc3339(),
-                data
-            ],
-        )
+    diesel::insert_into(agent_memory_documents::table)
+        .values((
+            agent_memory_documents::id.eq(document.id.to_string()),
+            agent_memory_documents::namespace.eq(document.namespace.clone()),
+            agent_memory_documents::source.eq(document.source.clone()),
+            agent_memory_documents::title.eq(document.title.clone()),
+            agent_memory_documents::created_at.eq(document.created_at.to_rfc3339()),
+            agent_memory_documents::updated_at.eq(document.updated_at.to_rfc3339()),
+            agent_memory_documents::data.eq(serialize_record(&document, "memory document")?),
+        ))
+        .execute(connection)
         .map_err(|error| sqlite_error("insert memory document", error))?;
     insert_memory_chunks_sqlite(connection, &chunks)?;
     Ok(document)
 }
 
 pub(super) fn insert_memory_chunks_sqlite(
-    connection: &Connection,
+    connection: &mut SqliteConnection,
     chunks: &[MemoryChunkRecord],
 ) -> CoreResult<()> {
     for chunk in chunks {
-        let data = serialize_record(chunk, "memory chunk")?;
         let keywords = serde_json::to_string(&chunk.keywords).map_err(|error| {
             CoreError::new(
                 500,
                 format!("failed to serialize memory chunk keywords for sqlite: {error}"),
             )
         })?;
-        connection
-            .execute(
-                r#"
-                INSERT INTO agent_memory_chunks (id, document_id, namespace, ordinal, keywords, data)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-                params![
-                    chunk.id.to_string(),
-                    chunk.document_id.to_string(),
-                    chunk.namespace,
-                    chunk.ordinal as i64,
-                    keywords,
-                    data
-                ],
-            )
+        diesel::insert_into(agent_memory_chunks::table)
+            .values((
+                agent_memory_chunks::id.eq(chunk.id.to_string()),
+                agent_memory_chunks::document_id.eq(chunk.document_id.to_string()),
+                agent_memory_chunks::namespace.eq(chunk.namespace.clone()),
+                agent_memory_chunks::ordinal.eq(chunk.ordinal as i64),
+                agent_memory_chunks::keywords.eq(keywords),
+                agent_memory_chunks::data.eq(serialize_record(chunk, "memory chunk")?),
+            ))
+            .execute(connection)
             .map_err(|error| sqlite_error("insert memory chunk", error))?;
     }
 
     Ok(())
 }
 
-pub(super) fn ensure_row_exists(
-    connection: &Connection,
-    table: &str,
-    id: Uuid,
-    entity: &str,
-) -> CoreResult<()> {
-    let sql = format!("SELECT 1 FROM {table} WHERE id = ?1");
-    let exists: Option<i64> = connection
-        .query_row(&sql, [id.to_string()], |row| row.get(0))
-        .optional()
-        .map_err(|error| sqlite_error(&format!("lookup {entity}"), error))?;
-    if exists.is_none() {
-        return Err(CoreError::not_found(entity));
-    }
-    Ok(())
-}
-
-pub(super) fn get_json_record_by_id<T>(
-    connection: &Connection,
-    table: &str,
-    id: Uuid,
-    entity: &str,
-) -> CoreResult<T>
-where
-    T: DeserializeOwned,
-{
-    let sql = format!("SELECT data FROM {table} WHERE id = ?1");
-    let data: Option<String> = connection
-        .query_row(&sql, [id.to_string()], |row| row.get(0))
-        .optional()
-        .map_err(|error| sqlite_error(&format!("load {entity}"), error))?;
-    let data = data.ok_or_else(|| CoreError::not_found(entity))?;
-    deserialize_record(&data, entity)
-}
-
-pub(super) fn query_json_records<T, P>(
-    connection: &Connection,
-    sql: &str,
-    params: P,
+pub(super) fn load_json_records<'query, T, Q>(
+    connection: &mut SqliteConnection,
+    query: Q,
     entity: &str,
 ) -> CoreResult<Vec<T>>
 where
     T: DeserializeOwned,
-    P: rusqlite::Params,
+    Q: LoadQuery<'query, SqliteConnection, String>,
 {
-    let mut statement = connection
-        .prepare(sql)
-        .map_err(|error| sqlite_error(&format!("prepare {entity} query"), error))?;
-    let mut rows = statement
-        .query(params)
-        .map_err(|error| sqlite_error(&format!("execute {entity} query"), error))?;
-
-    let mut results = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| sqlite_error(&format!("iterate {entity} rows"), error))?
-    {
-        let data: String = row
-            .get(0)
-            .map_err(|error| sqlite_error(&format!("read {entity} row"), error))?;
-        results.push(deserialize_record(&data, entity)?);
-    }
-    Ok(results)
+    let rows = query
+        .load::<String>(connection)
+        .map_err(|error| sqlite_error(&format!("load {entity} rows"), error))?;
+    deserialize_records(rows, entity)
 }
 
-pub(super) fn update_json_row<T: Serialize>(
-    connection: &Connection,
-    table: &str,
-    id: Uuid,
-    updated_at: String,
-    record: &T,
+pub(super) fn load_optional_json_record<'query, T, Q>(
+    connection: &mut SqliteConnection,
+    query: Q,
     entity: &str,
-) -> CoreResult<()> {
-    let data = serialize_record(record, entity)?;
-    let sql = format!("UPDATE {table} SET updated_at = ?2, data = ?3 WHERE id = ?1");
-    let updated = connection
-        .execute(&sql, params![id.to_string(), updated_at, data])
-        .map_err(|error| sqlite_error(&format!("update {entity}"), error))?;
-    if updated == 0 {
-        return Err(CoreError::not_found(entity));
-    }
-    Ok(())
+) -> CoreResult<Option<T>>
+where
+    T: DeserializeOwned,
+    Q: LoadQuery<'query, SqliteConnection, String>,
+{
+    let rows = load_json_records(connection, query, entity)?;
+    Ok(rows.into_iter().next())
 }
 
-pub(super) fn update_named_row<T: Serialize>(
-    connection: &Connection,
-    table: &str,
-    named_column: &str,
-    named_value: &str,
-    id: Uuid,
-    updated_at: String,
-    record: &T,
+pub(super) fn load_json_record<'query, T, Q>(
+    connection: &mut SqliteConnection,
+    query: Q,
     entity: &str,
-) -> CoreResult<()> {
-    let data = serialize_record(record, entity)?;
-    let sql =
-        format!("UPDATE {table} SET {named_column} = ?2, updated_at = ?3, data = ?4 WHERE id = ?1");
-    let updated = connection
-        .execute(&sql, params![id.to_string(), named_value, updated_at, data])
-        .map_err(|error| sqlite_error(&format!("update {entity}"), error))?;
-    if updated == 0 {
-        return Err(CoreError::not_found(entity));
-    }
-    Ok(())
+) -> CoreResult<T>
+where
+    T: DeserializeOwned,
+    Q: LoadQuery<'query, SqliteConnection, String>,
+{
+    load_optional_json_record(connection, query, entity)?
+        .ok_or_else(|| CoreError::not_found(entity))
 }
 
-pub(super) fn update_run_row(connection: &Connection, run: &RunRecord) -> CoreResult<()> {
-    let data = serialize_record(run, "run")?;
-    let updated = connection
-        .execute(
-            r#"
-            UPDATE agent_runs
-            SET finished_at = ?2, data = ?3
-            WHERE id = ?1
-            "#,
-            params![
-                run.id.to_string(),
-                run.finished_at.map(|value| value.to_rfc3339()),
-                data
-            ],
-        )
-        .map_err(|error| sqlite_error("update run", error))?;
-    if updated == 0 {
-        return Err(CoreError::not_found("run"));
+pub(super) fn expect_changed(changed: usize, entity: &str) -> CoreResult<()> {
+    if changed == 0 {
+        return Err(CoreError::not_found(entity));
     }
     Ok(())
 }
@@ -218,6 +126,15 @@ pub(super) fn deserialize_record<T: DeserializeOwned>(data: &str, entity: &str) 
     })
 }
 
-pub(super) fn sqlite_error(action: &str, error: rusqlite::Error) -> CoreError {
+pub(super) fn deserialize_records<T: DeserializeOwned>(
+    rows: Vec<String>,
+    entity: &str,
+) -> CoreResult<Vec<T>> {
+    rows.into_iter()
+        .map(|row| deserialize_record(&row, entity))
+        .collect()
+}
+
+pub(super) fn sqlite_error(action: &str, error: impl std::fmt::Display) -> CoreError {
     CoreError::new(500, format!("{action}: {error}"))
 }

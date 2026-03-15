@@ -40,4 +40,16 @@ impl std::fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+impl From<diesel::ConnectionError> for CoreError {
+    fn from(error: diesel::ConnectionError) -> Self {
+        Self::new(500, format!("sqlite connection error: {error}"))
+    }
+}
+
+impl From<diesel::result::Error> for CoreError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::new(500, format!("sqlite query error: {error}"))
+    }
+}
+
 pub type CoreResult<T> = Result<T, CoreError>;

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::params;
+use diesel::prelude::*;
 use uuid::Uuid;
 
 use crate::{
@@ -9,18 +9,23 @@ use crate::{
 
 use super::{
     helpers::{
-        get_json_record_by_id, query_json_records, serialize_record, sqlite_error, update_json_row,
+        expect_changed, load_json_record, load_json_records, serialize_record, sqlite_error,
     },
     store::SqliteStore,
+    tables::{
+        agent_messages, agent_runs, agent_session_skill_policies, agent_sessions, agent_tasks,
+    },
+    tasks::build_default_task_bundle,
 };
 
 impl SqliteStore {
     pub(super) async fn list_sessions_db(&self) -> CoreResult<Vec<SessionRecord>> {
-        let connection = self.open_connection()?;
-        query_json_records(
-            &connection,
-            "SELECT data FROM agent_sessions ORDER BY updated_at DESC",
-            [],
+        let mut connection = self.open_connection()?;
+        load_json_records(
+            &mut connection,
+            agent_sessions::table
+                .order(agent_sessions::updated_at.desc())
+                .select(agent_sessions::data),
             "session",
         )
     }
@@ -42,40 +47,87 @@ impl SqliteStore {
             summary: "New session".to_string(),
         };
 
-        let connection = self.open_connection()?;
-        let data = serialize_record(&session, "session")?;
-        connection
-            .execute(
-                r#"
-                INSERT INTO agent_sessions (id, created_at, updated_at, data)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                params![
-                    session.id.to_string(),
-                    session.created_at.to_rfc3339(),
-                    session.updated_at.to_rfc3339(),
-                    data
-                ],
-            )
+        let mut connection = self.open_connection()?;
+        diesel::insert_into(agent_sessions::table)
+            .values((
+                agent_sessions::id.eq(session.id.to_string()),
+                agent_sessions::created_at.eq(session.created_at.to_rfc3339()),
+                agent_sessions::updated_at.eq(session.updated_at.to_rfc3339()),
+                agent_sessions::data.eq(serialize_record(&session, "session")?),
+            ))
+            .execute(&mut connection)
             .map_err(|error| sqlite_error("insert session", error))?;
+        let policy = SessionSkillPolicy::default_for(session.id);
+        diesel::insert_into(agent_session_skill_policies::table)
+            .values((
+                agent_session_skill_policies::session_id.eq(session.id.to_string()),
+                agent_session_skill_policies::updated_at.eq(policy.updated_at.to_rfc3339()),
+                agent_session_skill_policies::data
+                    .eq(serialize_record(&policy, "session skill policy")?),
+            ))
+            .execute(&mut connection)
+            .map_err(|error| sqlite_error("insert default session skill policy", error))?;
         Ok(session)
     }
 
     pub(super) async fn get_session_db(&self, session_id: Uuid) -> CoreResult<SessionDetail> {
-        let connection = self.open_connection()?;
-        let session = get_json_record_by_id::<SessionRecord>(
-            &connection,
-            "agent_sessions",
-            session_id,
-            "session",
-        )?;
-        let messages = query_json_records(
-            &connection,
-            "SELECT data FROM agent_messages WHERE session_id = ?1 ORDER BY created_at ASC",
-            [session_id.to_string()],
-            "message",
-        )?;
-        Ok(SessionDetail { session, messages })
+        let (session, messages, session_runs, session_tasks) = {
+            let mut connection = self.open_connection()?;
+            let session = load_json_record::<SessionRecord, _>(
+                &mut connection,
+                agent_sessions::table
+                    .filter(agent_sessions::id.eq(session_id.to_string()))
+                    .select(agent_sessions::data),
+                "session",
+            )?;
+            let messages = load_json_records(
+                &mut connection,
+                agent_messages::table
+                    .filter(agent_messages::session_id.eq(session_id.to_string()))
+                    .order(agent_messages::created_at.asc())
+                    .select(agent_messages::data),
+                "message",
+            )?;
+            let session_runs: Vec<RunRecord> = load_json_records(
+                &mut connection,
+                agent_runs::table
+                    .filter(agent_runs::session_id.eq(session_id.to_string()))
+                    .order(agent_runs::started_at.desc())
+                    .select(agent_runs::data),
+                "run",
+            )?;
+            let session_tasks: Vec<TaskRecord> = load_json_records(
+                &mut connection,
+                agent_tasks::table
+                    .filter(agent_tasks::session_id.eq(session_id.to_string()))
+                    .order(agent_tasks::updated_at.desc())
+                    .select(agent_tasks::data),
+                "task",
+            )?;
+            (session, messages, session_runs, session_tasks)
+        };
+        let skills = self.get_session_skills_db(session_id).await?;
+        let active_run_summary = session_runs
+            .iter()
+            .find(|run| matches!(run.status, RunStatus::Running))
+            .cloned();
+        let latest_run_summary = session_runs.first().cloned();
+        let active_task_summary = select_active_task(&session_tasks);
+        let latest_stream_checkpoint_summary = if let Some(run) = latest_run_summary.as_ref() {
+            let events = self.list_run_events_db(run.id, None).await?;
+            build_stream_checkpoint_summary(run, &events)
+        } else {
+            None
+        };
+        Ok(SessionDetail {
+            session,
+            messages,
+            skill_summary: summarize_session_skills(&skills),
+            active_run_summary,
+            latest_run_summary,
+            active_task_summary,
+            latest_stream_checkpoint_summary,
+        })
     }
 
     pub(super) async fn update_session_db(
@@ -83,11 +135,12 @@ impl SqliteStore {
         session_id: Uuid,
         payload: UpdateSessionRequest,
     ) -> CoreResult<SessionRecord> {
-        let connection = self.open_connection()?;
-        let mut session = get_json_record_by_id::<SessionRecord>(
-            &connection,
-            "agent_sessions",
-            session_id,
+        let mut connection = self.open_connection()?;
+        let mut session = load_json_record::<SessionRecord, _>(
+            &mut connection,
+            agent_sessions::table
+                .filter(agent_sessions::id.eq(session_id.to_string()))
+                .select(agent_sessions::data),
             "session",
         )?;
         if let Some(title) = payload.title {
@@ -97,41 +150,47 @@ impl SqliteStore {
             session.status = status;
         }
         session.updated_at = Utc::now();
-        update_json_row(
-            &connection,
-            "agent_sessions",
-            session.id,
-            session.updated_at.to_rfc3339(),
-            &session,
-            "session",
-        )?;
+        let updated = diesel::update(
+            agent_sessions::table.filter(agent_sessions::id.eq(session.id.to_string())),
+        )
+        .set((
+            agent_sessions::updated_at.eq(session.updated_at.to_rfc3339()),
+            agent_sessions::data.eq(serialize_record(&session, "session")?),
+        ))
+        .execute(&mut connection)
+        .map_err(|error| sqlite_error("update session", error))?;
+        expect_changed(updated, "session")?;
         Ok(session)
     }
 
     pub(super) async fn delete_session_db(&self, session_id: Uuid) -> CoreResult<()> {
-        let connection = self.open_connection()?;
-        let deleted = connection
-            .execute(
-                "DELETE FROM agent_sessions WHERE id = ?1",
-                [session_id.to_string()],
-            )
-            .map_err(|error| sqlite_error("delete session", error))?;
-        if deleted == 0 {
-            return Err(CoreError::not_found("session"));
-        }
-        Ok(())
+        let mut connection = self.open_connection()?;
+        let deleted = diesel::delete(
+            agent_sessions::table.filter(agent_sessions::id.eq(session_id.to_string())),
+        )
+        .execute(&mut connection)
+        .map_err(|error| sqlite_error("delete session", error))?;
+        expect_changed(deleted, "session")
     }
 
     pub(super) async fn list_messages_db(
         &self,
         session_id: Uuid,
     ) -> CoreResult<Vec<MessageRecord>> {
-        let connection = self.open_connection()?;
-        super::helpers::ensure_row_exists(&connection, "agent_sessions", session_id, "session")?;
-        query_json_records(
-            &connection,
-            "SELECT data FROM agent_messages WHERE session_id = ?1 ORDER BY created_at ASC",
-            [session_id.to_string()],
+        let mut connection = self.open_connection()?;
+        let _session = load_json_record::<SessionRecord, _>(
+            &mut connection,
+            agent_sessions::table
+                .filter(agent_sessions::id.eq(session_id.to_string()))
+                .select(agent_sessions::data),
+            "session",
+        )?;
+        load_json_records(
+            &mut connection,
+            agent_messages::table
+                .filter(agent_messages::session_id.eq(session_id.to_string()))
+                .order(agent_messages::created_at.asc())
+                .select(agent_messages::data),
             "message",
         )
     }
@@ -144,10 +203,12 @@ impl SqliteStore {
         if payload.content.trim().is_empty() {
             return Err(CoreError::bad_request("message content cannot be empty"));
         }
+        let skills = self.get_session_skills_db(session_id).await?;
 
         let run = RunRecord {
             id: Uuid::new_v4(),
             session_id,
+            task_id: Uuid::nil(),
             trigger_type: "userMessage".to_string(),
             status: RunStatus::Running,
             selected_provider: None,
@@ -155,6 +216,20 @@ impl SqliteStore {
             started_at: Utc::now(),
             finished_at: None,
             error: None,
+            effective_skill_names: skills
+                .effective_skills
+                .iter()
+                .map(|entry| entry.skill.name.clone())
+                .collect(),
+            pinned_skill_names: skills
+                .effective_skills
+                .iter()
+                .filter(|entry| entry.is_pinned)
+                .map(|entry| entry.skill.name.clone())
+                .collect(),
+            last_event_sequence: 0,
+            stream_status: RunStreamStatus::Active,
+            active_stream_message_id: Some(Uuid::new_v4()),
         };
         let user_message = MessageRecord {
             id: Uuid::new_v4(),
@@ -164,74 +239,99 @@ impl SqliteStore {
             created_at: Utc::now(),
             run_id: Some(run.id),
         };
+        let (task, plan, steps) = build_default_task_bundle(session_id, &user_message);
+        let mut run = run;
+        run.task_id = task.id;
 
         let mut connection = self.open_connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| sqlite_error("begin enqueue user message transaction", error))?;
+        connection.transaction::<_, CoreError, _>(|transaction| {
+            let mut session = load_json_record::<SessionRecord, _>(
+                transaction,
+                agent_sessions::table
+                    .filter(agent_sessions::id.eq(session_id.to_string()))
+                    .select(agent_sessions::data),
+                "session",
+            )?;
+            session.updated_at = Utc::now();
+            session.last_run_at = Some(Utc::now());
 
-        let mut session = get_json_record_by_id::<SessionRecord>(
-            &transaction,
-            "agent_sessions",
-            session_id,
-            "session",
-        )?;
-        session.updated_at = Utc::now();
-        session.last_run_at = Some(Utc::now());
-
-        let session_data = serialize_record(&session, "session")?;
-        transaction
-            .execute(
-                r#"
-                UPDATE agent_sessions
-                SET updated_at = ?2, data = ?3
-                WHERE id = ?1
-                "#,
-                params![
-                    session.id.to_string(),
-                    session.updated_at.to_rfc3339(),
-                    session_data
-                ],
+            diesel::update(
+                agent_sessions::table.filter(agent_sessions::id.eq(session.id.to_string())),
             )
+            .set((
+                agent_sessions::updated_at.eq(session.updated_at.to_rfc3339()),
+                agent_sessions::data.eq(serialize_record(&session, "session")?),
+            ))
+            .execute(transaction)
             .map_err(|error| sqlite_error("update session during enqueue", error))?;
 
-        let run_data = serialize_record(&run, "run")?;
-        transaction
-            .execute(
-                r#"
-                INSERT INTO agent_runs (id, session_id, started_at, finished_at, data)
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                "#,
-                params![
-                    run.id.to_string(),
-                    run.session_id.to_string(),
-                    run.started_at.to_rfc3339(),
-                    Option::<String>::None,
-                    run_data
-                ],
-            )
-            .map_err(|error| sqlite_error("insert run", error))?;
+            SqliteStore::insert_task_bundle_sqlite(transaction, &task, &plan, &steps)?;
 
-        let message_data = serialize_record(&user_message, "message")?;
-        transaction
-            .execute(
-                r#"
-                INSERT INTO agent_messages (id, session_id, run_id, created_at, data)
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                "#,
-                params![
-                    user_message.id.to_string(),
-                    user_message.session_id.to_string(),
-                    user_message.run_id.map(|value| value.to_string()),
-                    user_message.created_at.to_rfc3339(),
-                    message_data
-                ],
-            )
-            .map_err(|error| sqlite_error("insert user message", error))?;
+            diesel::insert_into(agent_runs::table)
+                .values((
+                    agent_runs::id.eq(run.id.to_string()),
+                    agent_runs::session_id.eq(run.session_id.to_string()),
+                    agent_runs::task_id.eq(run.task_id.to_string()),
+                    agent_runs::started_at.eq(run.started_at.to_rfc3339()),
+                    agent_runs::finished_at.eq(Option::<String>::None),
+                    agent_runs::data.eq(serialize_record(&run, "run")?),
+                ))
+                .execute(transaction)
+                .map_err(|error| sqlite_error("insert run", error))?;
 
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("commit enqueue user message transaction", error))?;
+            diesel::insert_into(agent_messages::table)
+                .values((
+                    agent_messages::id.eq(user_message.id.to_string()),
+                    agent_messages::session_id.eq(user_message.session_id.to_string()),
+                    agent_messages::run_id.eq(user_message.run_id.map(|value| value.to_string())),
+                    agent_messages::created_at.eq(user_message.created_at.to_rfc3339()),
+                    agent_messages::data.eq(serialize_record(&user_message, "message")?),
+                ))
+                .execute(transaction)
+                .map_err(|error| sqlite_error("insert user message", error))?;
+
+            Ok(())
+        })?;
         Ok(RunAccepted { run, user_message })
     }
+}
+
+fn select_active_task(tasks: &[TaskRecord]) -> Option<TaskRecord> {
+    tasks
+        .iter()
+        .find(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Queued
+                    | TaskStatus::Planning
+                    | TaskStatus::Running
+                    | TaskStatus::WaitingForApproval
+                    | TaskStatus::Suspended
+            )
+        })
+        .cloned()
+        .or_else(|| tasks.first().cloned())
+}
+
+fn build_stream_checkpoint_summary(
+    run: &RunRecord,
+    events: &[RunEventEnvelope],
+) -> Option<StreamCheckpointSummary> {
+    let last_event = events.last()?;
+    let draft_reply_text = events
+        .iter()
+        .filter(|event| event.event_type == "message.delta")
+        .filter_map(|event| event.payload.get("delta").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    Some(StreamCheckpointSummary {
+        run_id: run.id,
+        last_sequence: last_event.sequence,
+        draft_reply_text,
+        updated_at: last_event.timestamp,
+        active_stream_message_id: run.active_stream_message_id,
+    })
 }

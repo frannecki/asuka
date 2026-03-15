@@ -126,7 +126,9 @@ export function describeRunEvent(
                 asString((hit as Record<string, unknown>).documentTitle) ?? "Untitled";
               const namespace =
                 asString((hit as Record<string, unknown>).namespace) ?? "global";
-              return `${title} [${namespace}]`;
+              const memoryScope =
+                asString((hit as Record<string, unknown>).memoryScope) ?? "global";
+              return `${title} [${memoryScope}/${namespace}]`;
             })
             .join("\n")
         : null;
@@ -142,10 +144,11 @@ export function describeRunEvent(
     case "memory.written": {
       const title = asString(event.payload.title) ?? "Untitled memory";
       const namespace = asString(event.payload.namespace) ?? "global";
+      const memoryScope = asString(event.payload.memoryScope) ?? "global";
       return {
         badge: "memory",
         title: "Memory saved",
-        summary: `${title} [${namespace}]`,
+        summary: `${title} [${memoryScope}/${namespace}]`,
         detail: asString(event.payload.documentId),
         tone: "success",
       };

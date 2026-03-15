@@ -14,7 +14,16 @@ pub(crate) struct StoreState {
     pub sessions: HashMap<Uuid, SessionRecord>,
     pub messages: HashMap<Uuid, Vec<MessageRecord>>,
     pub runs: HashMap<Uuid, RunRecord>,
+    pub run_events: HashMap<Uuid, Vec<RunEventEnvelope>>,
+    pub tasks: HashMap<Uuid, TaskRecord>,
+    pub artifacts: HashMap<Uuid, ArtifactRecord>,
+    pub plans: HashMap<Uuid, PlanRecord>,
+    pub plan_steps: HashMap<Uuid, Vec<PlanStepRecord>>,
+    pub run_steps: HashMap<Uuid, Vec<RunStepRecord>>,
+    pub tool_invocations: HashMap<Uuid, Vec<ToolInvocationRecord>>,
     pub skills: HashMap<Uuid, SkillRecord>,
+    pub session_skill_policies: HashMap<Uuid, SessionSkillPolicy>,
+    pub session_skill_bindings: HashMap<Uuid, Vec<SessionSkillBinding>>,
     pub subagents: HashMap<Uuid, SubagentRecord>,
     pub providers: HashMap<Uuid, ProviderAccountRecord>,
     pub memory_documents: HashMap<Uuid, MemoryDocumentRecord>,
@@ -28,7 +37,7 @@ impl StoreState {
 
         for configured_provider in &config.providers {
             let provider = ProviderAccountRecord {
-                id: Uuid::new_v4(),
+                id: stable_seed_id("provider", &configured_provider.display_name),
                 provider_type: configured_provider.provider_type.clone(),
                 display_name: configured_provider.display_name.clone(),
                 base_url: configured_provider.base_url.clone(),
@@ -42,7 +51,7 @@ impl StoreState {
         }
 
         let research_skill = SkillRecord {
-            id: Uuid::new_v4(),
+            id: stable_seed_id("skill", "research-skill"),
             name: "research-skill".to_string(),
             description: "Structured source-backed research workflow.".to_string(),
             status: ResourceStatus::Active,
@@ -52,7 +61,7 @@ impl StoreState {
         state.skills.insert(research_skill.id, research_skill);
 
         let planner_skill = SkillRecord {
-            id: Uuid::new_v4(),
+            id: stable_seed_id("skill", "planning-skill"),
             name: "planning-skill".to_string(),
             description: "Breaks large requests into inspectable execution steps.".to_string(),
             status: ResourceStatus::Active,
@@ -61,8 +70,29 @@ impl StoreState {
         };
         state.skills.insert(planner_skill.id, planner_skill);
 
+        let filesystem_skill = SkillRecord {
+            id: stable_seed_id("skill", "filesystem-skill"),
+            name: "filesystem-skill".to_string(),
+            description: "Guides safe local file inspection and editing workflows.".to_string(),
+            status: ResourceStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.skills.insert(filesystem_skill.id, filesystem_skill);
+
+        let debugging_skill = SkillRecord {
+            id: stable_seed_id("skill", "debugging-skill"),
+            name: "debugging-skill".to_string(),
+            description: "Structured reproduction, diagnosis, and fix verification workflow."
+                .to_string(),
+            status: ResourceStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.skills.insert(debugging_skill.id, debugging_skill);
+
         let subagent = SubagentRecord {
-            id: Uuid::new_v4(),
+            id: stable_seed_id("subagent", "research-analyst"),
             name: "research-analyst".to_string(),
             description: "Bounded specialist for investigation and synthesis.".to_string(),
             scope: "web research, notes, summarization".to_string(),
@@ -96,7 +126,7 @@ impl StoreState {
         }
 
         let mcp_server = McpServerRecord {
-            id: Uuid::new_v4(),
+            id: stable_seed_id("mcp", "filesystem"),
             name: "filesystem".to_string(),
             transport: "stdio".to_string(),
             command: "npx @modelcontextprotocol/server-filesystem".to_string(),
@@ -135,6 +165,9 @@ impl StoreState {
         state.sessions.insert(session.id, session);
         state.messages.insert(session_id, vec![welcome_message]);
         state
+            .session_skill_policies
+            .insert(session_id, SessionSkillPolicy::default_for(session_id));
+        state
     }
 }
 
@@ -145,14 +178,25 @@ fn seed_memory_document(
     content: &str,
 ) -> MemoryDocumentRecord {
     MemoryDocumentRecord {
-        id: Uuid::new_v4(),
+        id: stable_seed_id("memory", &format!("{namespace}:{source}:{title}")),
         title: title.to_string(),
         namespace: namespace.to_string(),
         source: source.to_string(),
+        memory_scope: MemoryScope::Global,
+        owner_session_id: None,
+        owner_task_id: None,
+        is_pinned: false,
         content: content.to_string(),
         summary: summarize_text(content, 18),
         chunk_count: 0,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
+}
+
+fn stable_seed_id(kind: &str, value: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("asuka:{kind}:{value}").as_bytes(),
+    )
 }

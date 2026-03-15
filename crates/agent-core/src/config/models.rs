@@ -35,7 +35,10 @@ impl ConfiguredProvider {
         self.models
             .iter()
             .map(|model| ProviderModelRecord {
-                id: Uuid::new_v4(),
+                id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_OID,
+                    format!("provider-model:{}:{}", self.display_name, model.name).as_bytes(),
+                ),
                 model_name: model.name.clone(),
                 context_window: model.context_window,
                 supports_tools: model.supports_tools,

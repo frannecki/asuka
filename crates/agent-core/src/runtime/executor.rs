@@ -4,7 +4,10 @@ use serde_json::json;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::{core::AgentCore, error::CoreResult, runtime::fallback_response, storage::RunContext};
+use crate::{
+    core::AgentCore, domain::PlanStepKind, error::CoreResult, memory::summarize_text,
+    runtime::fallback_response, storage::RunContext,
+};
 
 impl AgentCore {
     pub(crate) async fn execute_run(&self, session_id: Uuid, run_id: Uuid, user_content: String) {
@@ -13,23 +16,71 @@ impl AgentCore {
             run_id,
             session_id,
             json!({ "status": "running" }),
-        );
+        )
+        .await;
         sleep(Duration::from_millis(120)).await;
         if !self.run_is_active(run_id).await {
             return;
         }
+        let run = match self.get_run(run_id).await {
+            Ok(run) => run,
+            Err(_) => return,
+        };
+        let (context_plan_step_id, respond_plan_step_id) =
+            self.lookup_default_plan_step_ids(run.task_id).await;
+
+        let context_step = match self
+            .store
+            .start_run_step(
+                run_id,
+                context_plan_step_id,
+                PlanStepKind::ContextBuild,
+                "Build context".to_string(),
+                summarize_text(&user_content, 24),
+            )
+            .await
+        {
+            Ok(step) => step,
+            Err(error) => {
+                self.mark_run_failed(run_id, session_id, error).await;
+                return;
+            }
+        };
 
         let RunContext {
             providers,
             recent_messages,
             memory_hits,
+            effective_skill_names,
+            pinned_skill_names,
         } = match self
             .store
             .build_run_context(session_id, &user_content)
             .await
         {
-            Ok(context) => context,
+            Ok(context) => {
+                if let Err(error) = self
+                    .store
+                    .complete_run_step(
+                        context_step.id,
+                        format!(
+                            "Loaded {} recent messages and {} memory hits.",
+                            context.recent_messages.len(),
+                            context.memory_hits.len()
+                        ),
+                    )
+                    .await
+                {
+                    self.mark_run_failed(run_id, session_id, error).await;
+                    return;
+                }
+                context
+            }
             Err(error) => {
+                let _ = self
+                    .store
+                    .fail_run_step(context_step.id, error.message.clone())
+                    .await;
                 self.mark_run_failed(run_id, session_id, error).await;
                 return;
             }
@@ -56,7 +107,8 @@ impl AgentCore {
                 "stepType": "context-build",
                 "message": "Building context from the session, registry, and retrieval layers."
             }),
-        );
+        )
+        .await;
         sleep(Duration::from_millis(120)).await;
         if !self.run_is_active(run_id).await {
             return;
@@ -67,13 +119,37 @@ impl AgentCore {
             run_id,
             session_id,
             json!({ "hits": memory_hits }),
-        );
+        )
+        .await;
 
-        self.maybe_emit_prototype_subagent_activity(run_id, session_id, &user_content)
-            .await;
+        if let Err(error) = self
+            .maybe_emit_prototype_subagent_activity(run_id, session_id, run.task_id, &user_content)
+            .await
+        {
+            self.mark_run_failed(run_id, session_id, error).await;
+            return;
+        }
         if !self.run_is_active(run_id).await {
             return;
         }
+
+        let response_step = match self
+            .store
+            .start_run_step(
+                run_id,
+                respond_plan_step_id,
+                PlanStepKind::Respond,
+                "Produce response".to_string(),
+                summarize_text(&user_content, 24),
+            )
+            .await
+        {
+            Ok(step) => step,
+            Err(error) => {
+                self.mark_run_failed(run_id, session_id, error).await;
+                return;
+            }
+        };
 
         let response = match self
             .resolve_response(
@@ -82,13 +158,29 @@ impl AgentCore {
                 provider_selection.as_ref(),
                 &recent_messages,
                 &memory_hits,
+                &effective_skill_names,
+                &pinned_skill_names,
                 &user_content,
                 providers_count,
             )
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                if let Err(error) = self
+                    .store
+                    .complete_run_step(response_step.id, summarize_text(&response, 24))
+                    .await
+                {
+                    self.mark_run_failed(run_id, session_id, error).await;
+                    return;
+                }
+                response
+            }
             Err(error) => {
+                let _ = self
+                    .store
+                    .fail_run_step(response_step.id, error.message.clone())
+                    .await;
                 self.mark_run_failed(run_id, session_id, error).await;
                 return;
             }
@@ -106,6 +198,15 @@ impl AgentCore {
         {
             self.mark_run_failed(run_id, session_id, error).await;
         }
+    }
+
+    async fn lookup_default_plan_step_ids(&self, task_id: Uuid) -> (Option<Uuid>, Option<Uuid>) {
+        let Ok(plan_detail) = self.get_task_plan(task_id).await else {
+            return (None, None);
+        };
+        let context = find_plan_step_id(&plan_detail.steps, PlanStepKind::ContextBuild);
+        let respond = find_plan_step_id(&plan_detail.steps, PlanStepKind::Respond);
+        (context, respond)
     }
 
     async fn apply_provider_selection(
@@ -136,7 +237,8 @@ impl AgentCore {
                 "providerType": selection.provider_type,
                 "modelName": selection.model_name
             }),
-        );
+        )
+        .await;
 
         Ok(())
     }
@@ -148,6 +250,8 @@ impl AgentCore {
         selection: Option<&crate::runtime::ProviderSelection>,
         recent_messages: &[crate::domain::MessageRecord],
         memory_hits: &[crate::domain::MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
         providers_count: usize,
     ) -> CoreResult<String> {
@@ -156,6 +260,8 @@ impl AgentCore {
                 selection,
                 recent_messages,
                 memory_hits,
+                effective_skill_names,
+                pinned_skill_names,
                 user_content,
                 session_id,
                 run_id,
@@ -173,7 +279,8 @@ impl AgentCore {
                         "stepType": "model-fallback",
                         "message": error.message
                     }),
-                );
+                )
+                .await;
                 Ok(fallback_response(
                     selection,
                     memory_hits,
@@ -189,6 +296,8 @@ impl AgentCore {
         selection: Option<&crate::runtime::ProviderSelection>,
         recent_messages: &[crate::domain::MessageRecord],
         memory_hits: &[crate::domain::MemorySearchHit],
+        effective_skill_names: &[String],
+        pinned_skill_names: &[String],
         user_content: &str,
         session_id: Uuid,
         run_id: Uuid,
@@ -210,6 +319,8 @@ impl AgentCore {
             selection,
             recent_messages,
             memory_hits,
+            effective_skill_names,
+            pinned_skill_names,
             user_content,
             session_id,
             run_id,
@@ -217,6 +328,13 @@ impl AgentCore {
         )
         .await
     }
+}
+
+fn find_plan_step_id(steps: &[crate::domain::PlanStepRecord], kind: PlanStepKind) -> Option<Uuid> {
+    steps
+        .iter()
+        .find(|step| step.kind == kind)
+        .map(|step| step.id)
 }
 
 #[cfg(test)]
@@ -248,6 +366,8 @@ mod tests {
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 Some(&selection),
+                &[],
+                &[],
                 &[],
                 &[],
                 "Explain fallback behavior",

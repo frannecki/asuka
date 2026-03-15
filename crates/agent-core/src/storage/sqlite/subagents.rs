@@ -1,23 +1,25 @@
 use chrono::Utc;
-use rusqlite::params;
+use diesel::prelude::*;
 use uuid::Uuid;
 
 use crate::{domain::*, error::CoreResult};
 
 use super::{
     helpers::{
-        get_json_record_by_id, query_json_records, serialize_record, sqlite_error, update_named_row,
+        expect_changed, load_json_record, load_json_records, serialize_record, sqlite_error,
     },
     store::SqliteStore,
+    tables::agent_subagents,
 };
 
 impl SqliteStore {
     pub(super) async fn list_subagents_db(&self) -> CoreResult<Vec<SubagentRecord>> {
-        let connection = self.open_connection()?;
-        query_json_records(
-            &connection,
-            "SELECT data FROM agent_subagents ORDER BY updated_at DESC",
-            [],
+        let mut connection = self.open_connection()?;
+        load_json_records(
+            &mut connection,
+            agent_subagents::table
+                .order(agent_subagents::updated_at.desc())
+                .select(agent_subagents::data),
             "subagent",
         )
     }
@@ -37,28 +39,28 @@ impl SqliteStore {
             updated_at: Utc::now(),
         };
 
-        let connection = self.open_connection()?;
-        let data = serialize_record(&subagent, "subagent")?;
-        connection
-            .execute(
-                r#"
-                INSERT INTO agent_subagents (id, name, updated_at, data)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                params![
-                    subagent.id.to_string(),
-                    subagent.name,
-                    subagent.updated_at.to_rfc3339(),
-                    data
-                ],
-            )
+        let mut connection = self.open_connection()?;
+        diesel::insert_into(agent_subagents::table)
+            .values((
+                agent_subagents::id.eq(subagent.id.to_string()),
+                agent_subagents::name.eq(subagent.name.clone()),
+                agent_subagents::updated_at.eq(subagent.updated_at.to_rfc3339()),
+                agent_subagents::data.eq(serialize_record(&subagent, "subagent")?),
+            ))
+            .execute(&mut connection)
             .map_err(|error| sqlite_error("insert subagent", error))?;
         Ok(subagent)
     }
 
     pub(super) async fn get_subagent_db(&self, subagent_id: Uuid) -> CoreResult<SubagentRecord> {
-        let connection = self.open_connection()?;
-        get_json_record_by_id(&connection, "agent_subagents", subagent_id, "subagent")
+        let mut connection = self.open_connection()?;
+        load_json_record(
+            &mut connection,
+            agent_subagents::table
+                .filter(agent_subagents::id.eq(subagent_id.to_string()))
+                .select(agent_subagents::data),
+            "subagent",
+        )
     }
 
     pub(super) async fn update_subagent_db(
@@ -66,11 +68,12 @@ impl SqliteStore {
         subagent_id: Uuid,
         payload: UpdateSubagentRequest,
     ) -> CoreResult<SubagentRecord> {
-        let connection = self.open_connection()?;
-        let mut subagent = get_json_record_by_id::<SubagentRecord>(
-            &connection,
-            "agent_subagents",
-            subagent_id,
+        let mut connection = self.open_connection()?;
+        let mut subagent = load_json_record::<SubagentRecord, _>(
+            &mut connection,
+            agent_subagents::table
+                .filter(agent_subagents::id.eq(subagent_id.to_string()))
+                .select(agent_subagents::data),
             "subagent",
         )?;
         if let Some(description) = payload.description {
@@ -86,16 +89,18 @@ impl SqliteStore {
             subagent.status = status;
         }
         subagent.updated_at = Utc::now();
-        update_named_row(
-            &connection,
-            "agent_subagents",
-            "name",
-            &subagent.name,
-            subagent.id,
-            subagent.updated_at.to_rfc3339(),
-            &subagent,
-            "subagent",
-        )?;
+
+        let updated = diesel::update(
+            agent_subagents::table.filter(agent_subagents::id.eq(subagent.id.to_string())),
+        )
+        .set((
+            agent_subagents::name.eq(subagent.name.clone()),
+            agent_subagents::updated_at.eq(subagent.updated_at.to_rfc3339()),
+            agent_subagents::data.eq(serialize_record(&subagent, "subagent")?),
+        ))
+        .execute(&mut connection)
+        .map_err(|error| sqlite_error("update subagent", error))?;
+        expect_changed(updated, "subagent")?;
         Ok(subagent)
     }
 }

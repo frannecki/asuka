@@ -8,4 +8,4 @@ mod todos;
 mod types;
 
 pub(crate) use registry::ToolRegistry;
-pub(crate) use types::ToolDescriptor;
+pub(crate) use types::{ToolArtifact, ToolArtifactContent, ToolDescriptor};

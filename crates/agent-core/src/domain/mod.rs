@@ -1,3 +1,4 @@
+mod artifacts;
 mod mcp;
 mod memory;
 mod providers;
@@ -6,7 +7,10 @@ mod sessions;
 mod skills;
 mod status;
 mod subagents;
+mod tasks;
+mod workspace;
 
+pub use artifacts::*;
 pub use mcp::*;
 pub use memory::*;
 pub use providers::*;
@@ -15,3 +19,5 @@ pub use sessions::*;
 pub use skills::*;
 pub use status::*;
 pub use subagents::*;
+pub use tasks::*;
+pub use workspace::*;

@@ -22,6 +22,7 @@ pub struct AgentCore {
     pub(crate) event_tx: broadcast::Sender<RunEventEnvelope>,
     pub(crate) event_sequence: Arc<AtomicU64>,
     pub(crate) config_path: Arc<PathBuf>,
+    pub(crate) workspace_root: Arc<PathBuf>,
     pub(crate) openrouter_transport: Arc<dyn OpenRouterTransport>,
     pub(crate) tool_registry: Arc<ToolRegistry>,
 }
@@ -82,6 +83,7 @@ impl AgentCore {
             event_tx,
             event_sequence: Arc::new(AtomicU64::new(1)),
             config_path: Arc::new(config_path),
+            workspace_root: Arc::new(workspace_root.clone()),
             openrouter_transport,
             tool_registry: Arc::new(ToolRegistry::new(workspace_root)),
         })

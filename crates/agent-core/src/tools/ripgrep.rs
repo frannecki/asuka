@@ -96,14 +96,11 @@ impl Tool for RipgrepTool {
             }));
         }
 
-        Ok(ToolResult {
-            ok: true,
-            payload: json!({
-                "pattern": pattern,
-                "path": display_relative_path(&ctx.workspace_root, &target),
-                "matches": matches,
-                "truncated": truncated
-            }),
-        })
+        Ok(ToolResult::success(json!({
+            "pattern": pattern,
+            "path": display_relative_path(&ctx.workspace_root, &target),
+            "matches": matches,
+            "truncated": truncated
+        })))
     }
 }

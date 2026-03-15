@@ -1,5 +1,5 @@
-import { ChatShell } from "@/components/chat-shell";
+import { redirect } from "next/navigation";
 
-export default function ChatPage() {
-  return <ChatShell />;
+export default function ChatRedirectPage() {
+  redirect("/sessions");
 }

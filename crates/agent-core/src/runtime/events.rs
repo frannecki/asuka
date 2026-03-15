@@ -18,7 +18,7 @@ impl AgentCore {
         }
     }
 
-    pub(crate) fn publish_event(
+    pub(crate) async fn publish_event(
         &self,
         event_type: &str,
         run_id: Uuid,
@@ -34,6 +34,15 @@ impl AgentCore {
             payload,
         };
 
+        if let Err(error) = self.store.append_run_event(event.clone()).await {
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                event_type = %event_type,
+                "failed to persist run event: {}",
+                error.message
+            );
+        }
         let _ = self.event_tx.send(event);
     }
 }
@@ -45,16 +54,18 @@ mod tests {
 
     use crate::test_support::{create_test_core, multi_provider_config_toml};
 
-    #[test]
-    fn run_events_increment_sequence_and_broadcast_in_order() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_events_increment_sequence_and_broadcast_in_order() {
         let core = create_test_core(multi_provider_config_toml());
         let mut rx = core.subscribe_events();
         let run_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
         let ready = core.stream_ready_event(run_id, session_id);
-        core.publish_event("run.started", run_id, session_id, json!({ "step": 1 }));
-        core.publish_event("run.completed", run_id, session_id, json!({ "step": 2 }));
+        core.publish_event("run.started", run_id, session_id, json!({ "step": 1 }))
+            .await;
+        core.publish_event("run.completed", run_id, session_id, json!({ "step": 2 }))
+            .await;
 
         let started = rx.try_recv().expect("receive started event");
         let completed = rx.try_recv().expect("receive completed event");

@@ -1,23 +1,25 @@
 use chrono::Utc;
-use rusqlite::params;
+use diesel::prelude::*;
 use uuid::Uuid;
 
 use crate::{domain::*, error::CoreResult};
 
 use super::{
     helpers::{
-        get_json_record_by_id, query_json_records, serialize_record, sqlite_error, update_named_row,
+        expect_changed, load_json_record, load_json_records, serialize_record, sqlite_error,
     },
     store::SqliteStore,
+    tables::agent_skills,
 };
 
 impl SqliteStore {
     pub(super) async fn list_skills_db(&self) -> CoreResult<Vec<SkillRecord>> {
-        let connection = self.open_connection()?;
-        query_json_records(
-            &connection,
-            "SELECT data FROM agent_skills ORDER BY updated_at DESC",
-            [],
+        let mut connection = self.open_connection()?;
+        load_json_records(
+            &mut connection,
+            agent_skills::table
+                .order(agent_skills::updated_at.desc())
+                .select(agent_skills::data),
             "skill",
         )
     }
@@ -35,21 +37,15 @@ impl SqliteStore {
             updated_at: Utc::now(),
         };
 
-        let connection = self.open_connection()?;
-        let data = serialize_record(&skill, "skill")?;
-        connection
-            .execute(
-                r#"
-                INSERT INTO agent_skills (id, name, updated_at, data)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                params![
-                    skill.id.to_string(),
-                    skill.name,
-                    skill.updated_at.to_rfc3339(),
-                    data
-                ],
-            )
+        let mut connection = self.open_connection()?;
+        diesel::insert_into(agent_skills::table)
+            .values((
+                agent_skills::id.eq(skill.id.to_string()),
+                agent_skills::name.eq(skill.name.clone()),
+                agent_skills::updated_at.eq(skill.updated_at.to_rfc3339()),
+                agent_skills::data.eq(serialize_record(&skill, "skill")?),
+            ))
+            .execute(&mut connection)
             .map_err(|error| sqlite_error("insert skill", error))?;
         Ok(skill)
     }
@@ -59,9 +55,14 @@ impl SqliteStore {
         skill_id: Uuid,
         payload: UpdateSkillRequest,
     ) -> CoreResult<SkillRecord> {
-        let connection = self.open_connection()?;
-        let mut skill =
-            get_json_record_by_id::<SkillRecord>(&connection, "agent_skills", skill_id, "skill")?;
+        let mut connection = self.open_connection()?;
+        let mut skill = load_json_record::<SkillRecord, _>(
+            &mut connection,
+            agent_skills::table
+                .filter(agent_skills::id.eq(skill_id.to_string()))
+                .select(agent_skills::data),
+            "skill",
+        )?;
         if let Some(description) = payload.description {
             skill.description = description;
         }
@@ -69,16 +70,17 @@ impl SqliteStore {
             skill.status = status;
         }
         skill.updated_at = Utc::now();
-        update_named_row(
-            &connection,
-            "agent_skills",
-            "name",
-            &skill.name,
-            skill.id,
-            skill.updated_at.to_rfc3339(),
-            &skill,
-            "skill",
-        )?;
+
+        let updated =
+            diesel::update(agent_skills::table.filter(agent_skills::id.eq(skill.id.to_string())))
+                .set((
+                    agent_skills::name.eq(skill.name.clone()),
+                    agent_skills::updated_at.eq(skill.updated_at.to_rfc3339()),
+                    agent_skills::data.eq(serialize_record(&skill, "skill")?),
+                ))
+                .execute(&mut connection)
+                .map_err(|error| sqlite_error("update skill", error))?;
+        expect_changed(updated, "skill")?;
         Ok(skill)
     }
 }

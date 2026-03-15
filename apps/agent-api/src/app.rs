@@ -10,7 +10,13 @@ pub fn build_app(state: ApiState) -> Router {
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
-                .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                ])
                 .allow_headers(Any),
         )
         .with_state(state)
@@ -30,7 +36,11 @@ mod tests {
             create_test_core_with_openrouter_transport, TestOpenRouterOutcome,
             TestOpenRouterResponse, TestOpenRouterTransport,
         },
-        AgentCore, RunAccepted, RunRecord, RunStatus, SessionDetail, SessionRecord,
+        ActiveRunEnvelope, AgentCore, ArtifactProducerKind, ArtifactRecord, PlanDetail,
+        PlanStepKind, PlanStepStatus, RunAccepted, RunEventHistory, RunRecord, RunStatus,
+        RunStepRecord, RunStepStatus, SessionDetail, SessionRecord, SessionSkillAvailability,
+        SessionSkillPolicyMode, SessionSkillsDetail, SkillPreset, TaskExecutionDetail, TaskRecord,
+        TaskStatus, ToolInvocationRecord, WorkspaceNode,
     };
     use axum::{
         body::Body,
@@ -214,6 +224,43 @@ capabilities = ["chat"]
         decode_json(session_response).await
     }
 
+    async fn get_active_run_detail(app: &axum::Router, session_id: Uuid) -> ActiveRunEnvelope {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{session_id}/active-run"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get active run request");
+
+        decode_json(response).await
+    }
+
+    async fn get_run_event_history(
+        app: &axum::Router,
+        run_id: Uuid,
+        after_sequence: Option<u64>,
+    ) -> RunEventHistory {
+        let uri = after_sequence
+            .map(|value| format!("/api/v1/runs/{run_id}/events/history?afterSequence={value}"))
+            .unwrap_or_else(|| format!("/api/v1/runs/{run_id}/events/history"));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get run event history request");
+
+        decode_json(response).await
+    }
+
     #[derive(Debug)]
     struct TestSseEvent {
         event_type: String,
@@ -283,6 +330,16 @@ capabilities = ["chat"]
         }
 
         panic!("stream ended before receiving terminal event {terminal_event}");
+    }
+
+    fn workspace_contains_path(node: &WorkspaceNode, path: &str) -> bool {
+        if node.path == path {
+            return true;
+        }
+
+        node.children
+            .iter()
+            .any(|child| workspace_contains_path(child, path))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -404,6 +461,463 @@ capabilities = ["chat"]
             .messages
             .iter()
             .any(|message| matches!(message.role, agent_core::MessageRole::Assistant)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_message_persists_task_plan_and_run_steps_via_api() {
+        let _lock = lock_api_test();
+        let _store = EnvVarGuard::set("AGENT_STORE", "memory");
+        let _openrouter = EnvVarGuard::remove("OPENROUTER_API_KEY");
+        let app = build_test_router().await;
+
+        let session = create_session(&app, "Harness Session").await;
+        let accepted = post_session_message(
+            &app,
+            session.id,
+            "Explain how the structured harness tracks this request.",
+        )
+        .await;
+        let final_run = wait_for_completed_run(&app, accepted.run.id).await;
+
+        assert!(matches!(final_run.status, RunStatus::Completed));
+        assert_eq!(final_run.task_id, accepted.run.task_id);
+
+        let tasks_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks?sessionId={}", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list tasks request");
+        assert_eq!(tasks_response.status(), StatusCode::OK);
+        let tasks: Vec<TaskRecord> = decode_json(tasks_response).await;
+        let task = tasks
+            .iter()
+            .find(|task| task.id == accepted.run.task_id)
+            .expect("accepted task in task list");
+        assert_eq!(task.session_id, session.id);
+        assert_eq!(task.latest_run_id, Some(accepted.run.id));
+        assert!(matches!(task.status, TaskStatus::Completed));
+
+        let task_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{}", accepted.run.task_id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get task request");
+        assert_eq!(task_response.status(), StatusCode::OK);
+        let task_detail: TaskRecord = decode_json(task_response).await;
+        assert_eq!(task_detail.id, accepted.run.task_id);
+        assert_eq!(task_detail.current_plan_id, task.current_plan_id);
+
+        let plan_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{}/plan", accepted.run.task_id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get task plan request");
+        assert_eq!(plan_response.status(), StatusCode::OK);
+        let plan_detail: PlanDetail = decode_json(plan_response).await;
+        assert_eq!(plan_detail.plan.task_id, accepted.run.task_id);
+        assert_eq!(plan_detail.steps.len(), 2);
+        assert_eq!(plan_detail.steps[0].kind, PlanStepKind::ContextBuild);
+        assert_eq!(plan_detail.steps[1].kind, PlanStepKind::Respond);
+        assert!(plan_detail
+            .steps
+            .iter()
+            .all(|step| { matches!(step.status, PlanStepStatus::Completed) }));
+
+        let run_steps_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/steps", accepted.run.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list run steps request");
+        assert_eq!(run_steps_response.status(), StatusCode::OK);
+        let run_steps: Vec<RunStepRecord> = decode_json(run_steps_response).await;
+        assert!(run_steps.len() >= 2);
+        assert!(run_steps
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!(run_steps.iter().any(|step| {
+            step.plan_step_id == Some(plan_detail.steps[0].id)
+                && step.kind == PlanStepKind::ContextBuild
+                && matches!(step.status, RunStepStatus::Completed)
+        }));
+        assert!(run_steps.iter().any(|step| {
+            step.plan_step_id == Some(plan_detail.steps[1].id)
+                && step.kind == PlanStepKind::Respond
+                && matches!(step.status, RunStepStatus::Completed)
+        }));
+
+        let tool_invocations_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/tool-invocations", accepted.run.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list tool invocations request");
+        assert_eq!(tool_invocations_response.status(), StatusCode::OK);
+        let tool_invocations: Vec<ToolInvocationRecord> =
+            decode_json(tool_invocations_response).await;
+        assert!(tool_invocations.is_empty());
+
+        let execution_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{}/execution", accepted.run.task_id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("task execution request");
+        assert_eq!(execution_response.status(), StatusCode::OK);
+        let execution: TaskExecutionDetail = decode_json(execution_response).await;
+        assert_eq!(execution.task.id, accepted.run.task_id);
+        assert_eq!(execution.runs.len(), 1);
+        assert_eq!(execution.timeline_groups.len(), 1);
+        assert_eq!(execution.timeline_groups[0].run.id, accepted.run.id);
+        let assistant_artifact = execution.timeline_groups[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path.ends_with("assistant-response.md"))
+            .expect("assistant artifact in task execution");
+        assert_eq!(
+            assistant_artifact.producer_kind,
+            Some(ArtifactProducerKind::RunStep)
+        );
+        assert!(execution
+            .lineage_edges
+            .iter()
+            .any(|edge| edge.relation == "executes"));
+        assert!(execution.lineage_edges.iter().any(|edge| {
+            edge.relation == "produces"
+                && edge.to == format!("artifact:{}", assistant_artifact.id)
+                && edge.from.starts_with("run-step:")
+        }));
+        assert!(execution
+            .artifact_groups
+            .iter()
+            .any(|group| group.run_id == accepted.run.id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_run_exposes_session_workspace_artifacts_via_api() {
+        let _lock = lock_api_test();
+        let temp_root =
+            std::env::temp_dir().join(format!("asuka-workspace-api-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temporary workspace root");
+        let _workspace_root = EnvVarGuard::set(
+            "ASUKA_WORKSPACE_ROOT",
+            temp_root.to_str().expect("temporary workspace root"),
+        );
+        let _store = EnvVarGuard::set("AGENT_STORE", "memory");
+        let _openrouter = EnvVarGuard::remove("OPENROUTER_API_KEY");
+        let app = build_test_router().await;
+
+        let session = create_session(&app, "Workspace Session").await;
+        let accepted = post_session_message(
+            &app,
+            session.id,
+            "Explain how the workspace artifacts are produced for this run.",
+        )
+        .await;
+        let final_run = wait_for_completed_run(&app, accepted.run.id).await;
+        assert!(matches!(final_run.status, RunStatus::Completed));
+
+        let tree_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{}/workspace/tree", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("workspace tree request");
+        assert_eq!(tree_response.status(), StatusCode::OK);
+        let tree: WorkspaceNode = decode_json(tree_response).await;
+        assert!(workspace_contains_path(
+            &tree,
+            &format!("runs/{}/assistant-response.md", accepted.run.id)
+        ));
+        assert!(workspace_contains_path(
+            &tree,
+            &format!("runs/{}/report.html", accepted.run.id)
+        ));
+
+        let artifacts_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{}/artifacts", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("session artifacts request");
+        assert_eq!(artifacts_response.status(), StatusCode::OK);
+        let artifacts: Vec<ArtifactRecord> = decode_json(artifacts_response).await;
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.path
+                == format!("runs/{}/assistant-response.md", accepted.run.id)));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.path == format!("runs/{}/report.html", accepted.run.id)));
+
+        let task_artifacts_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{}/artifacts", accepted.run.task_id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("task artifacts request");
+        assert_eq!(task_artifacts_response.status(), StatusCode::OK);
+        let task_artifacts: Vec<ArtifactRecord> = decode_json(task_artifacts_response).await;
+        assert_eq!(task_artifacts.len(), artifacts.len());
+
+        let run_artifacts_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/artifacts", accepted.run.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("run artifacts request");
+        assert_eq!(run_artifacts_response.status(), StatusCode::OK);
+        let run_artifacts: Vec<ArtifactRecord> = decode_json(run_artifacts_response).await;
+        assert_eq!(run_artifacts.len(), artifacts.len());
+
+        let markdown_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/sessions/{}/workspace/raw/runs/{}/assistant-response.md",
+                        session.id, accepted.run.id
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("workspace raw request");
+        assert_eq!(markdown_response.status(), StatusCode::OK);
+        let markdown_content_type = markdown_response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("markdown content type");
+        assert!(markdown_content_type.starts_with("text/markdown"));
+        let markdown_body = to_bytes(markdown_response.into_body())
+            .await
+            .expect("read markdown body");
+        let markdown_text =
+            String::from_utf8(markdown_body.to_vec()).expect("decode markdown artifact");
+        assert!(markdown_text.contains("Assistant response"));
+        assert!(markdown_text.contains("workspace artifacts"));
+
+        let render_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/sessions/{}/workspace/render/runs/{}/assistant-response.md",
+                        session.id, accepted.run.id
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("workspace render request");
+        assert_eq!(render_response.status(), StatusCode::OK);
+        let render_content_type = render_response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("render content type");
+        assert!(render_content_type.starts_with("text/html"));
+        let render_body = to_bytes(render_response.into_body())
+            .await
+            .expect("read rendered markdown body");
+        let rendered_html = String::from_utf8(render_body.to_vec()).expect("decode rendered html");
+        assert!(rendered_html.contains("<!doctype html>"));
+        assert!(rendered_html.contains("Assistant response"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_and_subagent_artifacts_surface_via_api_execution_views() {
+        let _lock = lock_api_test();
+        let temp_root =
+            std::env::temp_dir().join(format!("asuka-tool-artifact-api-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temporary workspace root");
+        let _workspace_root = EnvVarGuard::set(
+            "ASUKA_WORKSPACE_ROOT",
+            temp_root.to_str().expect("temporary workspace root"),
+        );
+        let _store = EnvVarGuard::set("AGENT_STORE", "memory");
+        let _openrouter = EnvVarGuard::set("OPENROUTER_API_KEY", "test-key");
+        let transport = TestOpenRouterTransport::new(vec![
+            TestOpenRouterOutcome::Response(TestOpenRouterResponse::json(
+                200,
+                r##"{"choices":[{"message":{"content":"{\"type\":\"tool\",\"tool\":\"write_file\",\"arguments\":{\"path\":\"notes/tool-output.md\",\"content\":\"# Tool Artifact\\n\\nCreated while the run is still executing.\\n\"}}"}}]}"##,
+            )),
+            TestOpenRouterOutcome::Response(TestOpenRouterResponse::json(
+                200,
+                r##"{"choices":[{"message":{"content":"{\"type\":\"final\",\"content\":\"The tool artifact and subagent output are ready.\"}"}}]}"##,
+            )),
+        ]);
+        let app = build_test_router_with_openrouter_transport(transport.clone());
+
+        let session = create_session(&app, "Artifact Streaming Session").await;
+        let accepted = post_session_message(
+            &app,
+            session.id,
+            "Use a subagent to analyze this request, write notes/tool-output.md with a markdown summary, then finish.",
+        )
+        .await;
+        let final_run = wait_for_completed_run(&app, accepted.run.id).await;
+        assert!(matches!(final_run.status, RunStatus::Completed));
+
+        let artifacts_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{}/artifacts", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("session artifacts request");
+        assert_eq!(artifacts_response.status(), StatusCode::OK);
+        let artifacts: Vec<ArtifactRecord> = decode_json(artifacts_response).await;
+
+        let tool_result_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.path.contains("/tool-invocations/")
+                    && artifact.path.ends_with("/result.json")
+            })
+            .expect("tool result artifact");
+        assert_eq!(
+            tool_result_artifact.producer_kind,
+            Some(ArtifactProducerKind::ToolInvocation)
+        );
+
+        let tool_snapshot_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .path
+                    .ends_with("/outputs/workspace/notes/tool-output.md")
+            })
+            .expect("tool snapshot artifact");
+        assert_eq!(
+            tool_snapshot_artifact.producer_kind,
+            Some(ArtifactProducerKind::ToolInvocation)
+        );
+        assert_eq!(
+            tool_snapshot_artifact.producer_ref_id,
+            tool_result_artifact.producer_ref_id
+        );
+
+        let subagent_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.path.contains("/subagents/") && artifact.path.ends_with("/summary.md")
+            })
+            .expect("subagent summary artifact");
+        assert_eq!(
+            subagent_artifact.producer_kind,
+            Some(ArtifactProducerKind::RunStep)
+        );
+
+        let tree_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{}/workspace/tree", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("workspace tree request");
+        assert_eq!(tree_response.status(), StatusCode::OK);
+        let tree: WorkspaceNode = decode_json(tree_response).await;
+        assert!(workspace_contains_path(&tree, &tool_snapshot_artifact.path));
+        assert!(workspace_contains_path(&tree, &subagent_artifact.path));
+
+        let snapshot_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/sessions/{}/workspace/raw/{}",
+                        session.id, tool_snapshot_artifact.path
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("snapshot workspace request");
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        let snapshot_body = to_bytes(snapshot_response.into_body())
+            .await
+            .expect("read snapshot body");
+        let snapshot_text = String::from_utf8(snapshot_body.to_vec()).expect("decode snapshot");
+        assert!(snapshot_text.contains("# Tool Artifact"));
+        assert!(snapshot_text.contains("still executing"));
+
+        let execution_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{}/execution", accepted.run.task_id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("task execution request");
+        assert_eq!(execution_response.status(), StatusCode::OK);
+        let execution: TaskExecutionDetail = decode_json(execution_response).await;
+        assert!(execution.lineage_edges.iter().any(|edge| {
+            edge.relation == "produces"
+                && edge.from
+                    == format!(
+                        "tool:{}",
+                        tool_snapshot_artifact
+                            .producer_ref_id
+                            .expect("tool snapshot producer ref id")
+                    )
+                && edge.to == format!("artifact:{}", tool_snapshot_artifact.id)
+        }));
+        assert!(execution.lineage_edges.iter().any(|edge| {
+            edge.relation == "produces"
+                && edge.from.starts_with("run-step:")
+                && edge.to == format!("artifact:{}", subagent_artifact.id)
+        }));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -561,6 +1075,96 @@ capabilities = ["chat"]
         let recorded_requests = transport.recorded_requests();
         assert_eq!(recorded_requests.len(), 1);
         assert!(recorded_requests[0].endpoint.ends_with("/chat/completions"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_run_and_event_history_routes_support_stream_recovery() {
+        let _lock = lock_api_test();
+        let _store = EnvVarGuard::set("AGENT_STORE", "memory");
+        let _openrouter = EnvVarGuard::set("OPENROUTER_API_KEY", "test-key");
+        let long_reply = "Deterministic streamed provider reply for recovery coverage. ".repeat(24);
+        let transport = TestOpenRouterTransport::new(vec![TestOpenRouterOutcome::Response(
+            TestOpenRouterResponse::json(
+                200,
+                &format!(
+                    r#"{{"choices":[{{"message":{{"content":"{}"}}}}]}}"#,
+                    long_reply
+                ),
+            ),
+        )]);
+        let app = build_test_router_with_openrouter_transport(transport);
+        let session = create_session(&app, "Recovery Session").await;
+        let accepted = post_session_message(
+            &app,
+            session.id,
+            "Return a long deterministic provider answer for reconnect coverage.",
+        )
+        .await;
+
+        let active_run = loop {
+            let active = get_active_run_detail(&app, session.id).await;
+            if active.run.is_some() {
+                break active;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(active_run.run.expect("active run").id, accepted.run.id);
+
+        let history = loop {
+            let history = get_run_event_history(&app, accepted.run.id, None).await;
+            if history
+                .events
+                .iter()
+                .any(|event| event.event_type == "message.delta")
+            {
+                break history;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(history.run_id, accepted.run.id);
+        assert!(history.last_sequence > 0);
+        let last_sequence = history.last_sequence;
+
+        let replay = get_run_event_history(&app, accepted.run.id, Some(last_sequence - 1)).await;
+        assert!(replay
+            .events
+            .iter()
+            .all(|event| event.sequence > last_sequence - 1));
+        assert_eq!(
+            replay.events.first().expect("replayed event").sequence,
+            last_sequence
+        );
+
+        let stream_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/runs/{}/events?afterSequence={}",
+                        accepted.run.id, last_sequence
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("stream replay request");
+
+        assert_eq!(stream_response.status(), StatusCode::OK);
+        let events = decode_sse_until(stream_response, "run.completed").await;
+        assert_eq!(
+            events.first().expect("stream ready event").event_type,
+            "run.stream.ready"
+        );
+        assert!(events
+            .iter()
+            .filter(|event| event.event_type != "run.stream.ready")
+            .all(|event| event.data["sequence"].as_u64().unwrap_or_default() > last_sequence));
+
+        let final_run = wait_for_completed_run(&app, accepted.run.id).await;
+        assert!(matches!(final_run.status, RunStatus::Completed));
+
+        let active_after_completion = get_active_run_detail(&app, session.id).await;
+        assert!(active_after_completion.run.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -787,5 +1391,113 @@ capabilities = ["chat"]
         let recorded_requests = transport.recorded_requests();
         assert_eq!(recorded_requests.len(), 1);
         assert!(recorded_requests[0].endpoint.ends_with("/chat/completions"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_skill_routes_return_effective_policy_and_overrides() {
+        let _lock = lock_api_test();
+        let _store = EnvVarGuard::set("AGENT_STORE", "memory");
+        let app = build_test_router().await;
+        let session = create_session(&app, "Skill Session").await;
+
+        let presets_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/skill-presets")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list skill presets request");
+        assert_eq!(presets_response.status(), StatusCode::OK);
+        let presets: Vec<SkillPreset> = decode_json(presets_response).await;
+        assert!(presets.iter().any(|preset| preset.id == "coding"));
+
+        let detail_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{}/skills", session.id))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get session skills request");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail: SessionSkillsDetail = decode_json(detail_response).await;
+        assert_eq!(detail.policy.mode, SessionSkillPolicyMode::InheritDefault);
+        assert!(!detail.effective_skills.is_empty());
+
+        let first_skill = detail
+            .effective_skills
+            .first()
+            .expect("first effective skill")
+            .skill
+            .id;
+
+        let patch_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!(
+                        "/api/v1/sessions/{}/skills/{}",
+                        session.id, first_skill
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "availability": "pinned"
+                        }))
+                        .expect("serialize binding payload"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("patch session skill binding request");
+        assert_eq!(patch_response.status(), StatusCode::OK);
+        let patched: SessionSkillsDetail = decode_json(patch_response).await;
+        assert!(patched
+            .effective_skills
+            .iter()
+            .any(|entry| entry.skill.id == first_skill
+                && entry.availability == SessionSkillAvailability::Pinned));
+
+        let apply_preset_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/sessions/{}/skills/apply-preset",
+                        session.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "presetId": "minimal"
+                        }))
+                        .expect("serialize preset payload"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("apply preset request");
+        assert_eq!(apply_preset_response.status(), StatusCode::OK);
+        let preset_detail: SessionSkillsDetail = decode_json(apply_preset_response).await;
+        assert_eq!(preset_detail.policy.mode, SessionSkillPolicyMode::Preset);
+        assert_eq!(preset_detail.policy.preset_id.as_deref(), Some("minimal"));
+        assert!(preset_detail.bindings.is_empty());
+
+        let session_detail = get_session_detail(&app, session.id).await;
+        assert_eq!(
+            session_detail.skill_summary.policy.mode,
+            SessionSkillPolicyMode::Preset
+        );
+        assert_eq!(
+            session_detail.skill_summary.policy.preset_id.as_deref(),
+            Some("minimal")
+        );
     }
 }

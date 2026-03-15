@@ -16,13 +16,13 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Asuka Agent Console",
-  description: "Deep-agent backend and chat console prototype",
+  title: "Asuka Agent Workspace",
+  description: "Local agent harness with session workspaces and streamed runs",
 };
 
 const navigation = [
-  { href: "/", label: "Overview" },
-  { href: "/chat", label: "Chat" },
+  { href: "/dashboard", label: "Dashboard" },
+  { href: "/sessions", label: "Sessions" },
   { href: "/memory", label: "Memory" },
   { href: "/skills", label: "Skills" },
   { href: "/subagents", label: "Subagents" },
@@ -42,7 +42,7 @@ export default function RootLayout({
           <header className="app-header">
             <div>
               <p className="eyebrow">Asuka</p>
-              <h1>Deep Agent Console</h1>
+              <h1>Deep Agent Workspace</h1>
             </div>
             <nav className="top-nav">
               {navigation.map((item) => (
