@@ -15,6 +15,7 @@ import type {
   MemoryScope,
   SessionMemoryOverview,
 } from "@/lib/types";
+import { compactId, excerpt, formatDateTime, humanizeLabel } from "@/lib/view";
 
 type SessionMemoryViewProps = {
   sessionId: string;
@@ -162,19 +163,18 @@ export function SessionMemoryView({ sessionId }: SessionMemoryViewProps) {
 
   return (
     <div className="stack-gap">
-      {error ? <p className="error-copy">{error}</p> : null}
-      {feedback ? <p className="hint-copy">{feedback}</p> : null}
-
-      <section className="panel stack-gap">
-        <div className="panel-header">
+      <section className="hero-shell panel">
+        <div className="hero-copy">
           <div>
             <p className="eyebrow">Session memory</p>
-            <h2>Short-term recall and scoped notes</h2>
+            <h2>Short-term recall, pinned notes, and retrieval traces.</h2>
           </div>
-          <div className="stack-inline">
-            <span className="status-pill">
-              {scopedDocuments.length} scoped doc(s)
-            </span>
+          <p>
+            This view reads the session memory overview, lets you summarize the
+            conversation back into durable memory, and promotes useful notes out
+            to project or global scope.
+          </p>
+          <div className="hero-actions">
             <button
               className="primary-button"
               disabled={busyKey !== null}
@@ -184,38 +184,49 @@ export function SessionMemoryView({ sessionId }: SessionMemoryViewProps) {
               Summarize session
             </button>
           </div>
+          {error ? <p className="error-copy">{error}</p> : null}
+          {feedback ? <p className="status-pill tone-mint">{feedback}</p> : null}
         </div>
 
-        <div className="session-memory-overview-grid">
-          <article className="memory-summary-card">
+        <div className="hero-art">
+          <div className="hero-stat-strip">
+            <article className="hero-stat">
+              <strong>{scopedDocuments.length}</strong>
+              <span>scoped docs</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{pinnedDocuments.length}</strong>
+              <span>pinned docs</span>
+            </article>
+          </div>
+          <article className="hero-orb">
             <p className="eyebrow">Short-term summary</p>
-            <p>
-              {overview?.shortTermSummary ||
-                "No short-term session summary is available yet."}
-            </p>
-          </article>
-
-          <article className="memory-summary-card">
-            <p className="eyebrow">Pinned notes</p>
-            <div className="session-chip-list">
-              {pinnedDocuments.map((document) => (
-                <button
-                  className="timeline-chip artifact"
-                  key={document.id}
-                  onClick={() => void handleSelect(document.id)}
-                  type="button"
-                >
-                  {document.title}
-                </button>
-              ))}
-              {pinnedDocuments.length === 0 ? (
-                <span className="hint-copy">
-                  Pin the most useful session memories to keep them visible.
-                </span>
-              ) : null}
-            </div>
+            <strong>{overview?.shortTermSummary || "No short-term summary yet."}</strong>
           </article>
         </div>
+      </section>
+
+      <section className="memory-overview-grid">
+        <article className="memory-summary-card">
+          <p className="eyebrow">Pinned notes</p>
+          <div className="session-chip-list">
+            {pinnedDocuments.map((document) => (
+              <button
+                className="timeline-chip artifact"
+                key={document.id}
+                onClick={() => void handleSelect(document.id)}
+                type="button"
+              >
+                {document.title}
+              </button>
+            ))}
+            {pinnedDocuments.length === 0 ? (
+              <span className="story-kicker">
+                Pin the most useful session memories to keep them visible.
+              </span>
+            ) : null}
+          </div>
+        </article>
       </section>
 
       <section className="session-memory-grid">
@@ -242,11 +253,11 @@ export function SessionMemoryView({ sessionId }: SessionMemoryViewProps) {
                 >
                   <div className="activity-copy">
                     <strong>{document.title}</strong>
-                    <p>{document.summary}</p>
+                    <p>{excerpt(document.summary, 120)}</p>
                   </div>
                   <div className="status-strip">
-                    <span className="status-pill">{document.memoryScope}</span>
-                    {document.isPinned ? <span className="status-pill">pinned</span> : null}
+                    <span className="status-pill">{humanizeLabel(document.memoryScope)}</span>
+                    {document.isPinned ? <span className="status-pill tone-sun">Pinned</span> : null}
                     <span className="status-pill">{document.namespace}</span>
                   </div>
                 </button>
@@ -307,14 +318,12 @@ export function SessionMemoryView({ sessionId }: SessionMemoryViewProps) {
             {overview?.recentRetrievals.map((retrieval) => (
               <article className="activity-card" key={`${retrieval.runId}-${retrieval.timestamp}`}>
                 <div className="activity-topline">
-                  <span className="activity-badge">
-                    run {retrieval.runId.slice(0, 8)}
-                  </span>
-                  <span>{new Date(retrieval.timestamp).toLocaleString()}</span>
+                  <span className="activity-badge">Run {compactId(retrieval.runId)}</span>
+                  <span>{formatDateTime(retrieval.timestamp)}</span>
                 </div>
                 <div className="activity-copy">
                   <strong>{retrieval.hits.length} retrieved hit(s)</strong>
-                  <p>Task {retrieval.taskId.slice(0, 8)}</p>
+                  <p>Task {compactId(retrieval.taskId)}</p>
                 </div>
                 <div className="session-chip-list">
                   {retrieval.hits.slice(0, 4).map((hit) => (
@@ -345,9 +354,9 @@ export function SessionMemoryView({ sessionId }: SessionMemoryViewProps) {
           {selected ? (
             <div className="stack-gap">
               <div className="status-strip">
-                <span className="status-pill">{selected.document.memoryScope}</span>
+                <span className="status-pill">{humanizeLabel(selected.document.memoryScope)}</span>
                 <span className="status-pill">{selected.document.namespace}</span>
-                {selected.document.isPinned ? <span className="status-pill">pinned</span> : null}
+                {selected.document.isPinned ? <span className="status-pill tone-sun">Pinned</span> : null}
               </div>
               <p>{selected.document.content}</p>
               <div className="stack-gap">

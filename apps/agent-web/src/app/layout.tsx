@@ -1,11 +1,17 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
+import { Baloo_2, IBM_Plex_Mono, Manrope } from "next/font/google";
 
 import "./globals.css";
 
-const spaceGrotesk = Space_Grotesk({
+const baloo = Baloo_2({
   variable: "--font-display",
+  subsets: ["latin"],
+  weight: ["600", "700"],
+});
+
+const manrope = Manrope({
+  variable: "--font-body",
   subsets: ["latin"],
 });
 
@@ -20,16 +26,6 @@ export const metadata: Metadata = {
   description: "Local agent harness with session workspaces and streamed runs",
 };
 
-const navigation = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/sessions", label: "Sessions" },
-  { href: "/memory", label: "Memory" },
-  { href: "/skills", label: "Skills" },
-  { href: "/subagents", label: "Subagents" },
-  { href: "/settings/providers", label: "Providers" },
-  { href: "/settings/mcp", label: "MCP" },
-];
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -37,19 +33,27 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${spaceGrotesk.variable} ${plexMono.variable}`}>
-        <div className="app-shell">
-          <header className="app-header">
-            <div>
-              <p className="eyebrow">Asuka</p>
-              <h1>Deep Agent Workspace</h1>
-            </div>
-            <nav className="top-nav">
-              {navigation.map((item) => (
-                <Link href={item.href} key={item.href}>
-                  {item.label}
-                </Link>
-              ))}
+      <body className={`${baloo.variable} ${manrope.variable} ${plexMono.variable}`}>
+        <div className="page-splash" aria-hidden="true" />
+        <div className="page-halftone" aria-hidden="true" />
+
+        <div className="app-shell app-shell-simple">
+          <header className="global-nav">
+            <Link className="nav-brand" href="/">
+              <span className="nav-brand-icon">A</span>
+              <div>
+                <strong>Asuka</strong>
+                <span>chat workspace</span>
+              </div>
+            </Link>
+
+            <nav className="nav-links" aria-label="Primary">
+              <Link className="nav-link-pill" href="/">
+                Home
+              </Link>
+              <Link className="nav-link-pill" href="/dashboard">
+                Dashboard
+              </Link>
             </nav>
           </header>
 

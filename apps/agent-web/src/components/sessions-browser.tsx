@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { createSession, listSessions } from "@/lib/api";
 import type { SessionRecord } from "@/lib/types";
+import { excerpt, formatDateTime, humanizeLabel } from "@/lib/view";
 
 export function SessionsBrowser() {
   const router = useRouter();
@@ -53,50 +54,75 @@ export function SessionsBrowser() {
 
   return (
     <div className="stack-gap">
-      <section className="panel dashboard-hero">
-        <div className="dashboard-hero-copy">
-          <p className="eyebrow">Sessions</p>
-          <h2>Choose a workspace before you chat.</h2>
+      <section className="hero-shell panel">
+        <div className="hero-copy">
+          <div>
+            <p className="eyebrow">Session Browser</p>
+            <h2>Each workspace keeps its own chat, runs, artifacts, memory, and skills.</h2>
+          </div>
           <p>
-            Each session now owns its own workspace routes, skill policy, and
-            durable harness history.
+            Pick up a live thread, branch a workspace, or open a fresh session
+            before you talk to the agent.
           </p>
+          <div className="hero-actions">
+            <button className="primary-button" onClick={handleCreateSession} type="button">
+              Start new session
+            </button>
+            <Link className="ghost-button" href="/dashboard">
+              Back to dashboard
+            </Link>
+          </div>
+          {error ? <p className="error-copy">{error}</p> : null}
         </div>
-        <div className="dashboard-hero-actions">
-          <button className="primary-button" onClick={handleCreateSession} type="button">
-            New session
-          </button>
-          <Link className="ghost-button" href="/dashboard">
-            Back to dashboard
-          </Link>
+
+        <div className="hero-art">
+          <div className="hero-stat-strip">
+            <article className="hero-stat">
+              <strong>{sessions.length}</strong>
+              <span>available workspaces</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{sessions.filter((session) => session.lastRunAt).length}</strong>
+              <span>with run history</span>
+            </article>
+          </div>
+          <article className="hero-orb">
+            <p className="eyebrow">Why sessions matter</p>
+            <strong>Frontend routes map directly onto backend session resources.</strong>
+            <p>
+              Selecting a session switches the UI into its scoped chat history,
+              durable tasks, artifact tree, memory overview, and skill policy.
+            </p>
+          </article>
         </div>
       </section>
 
-      {error ? <p className="error-copy">{error}</p> : null}
-
       <section className="session-browser-grid">
         {sessions.map((session) => (
-          <article className="panel session-browser-card" key={session.id}>
-            <div className="stack-gap">
-              <div>
-                <p className="eyebrow">{session.status}</p>
-                <h2>{session.title}</h2>
+          <article className="catalog-card" key={session.id}>
+            <div className="text-block">
+              <div className="story-meta">
+                <p className="eyebrow">{humanizeLabel(session.status)}</p>
+                <span className="status-pill tone-sky">
+                  {session.lastRunAt ? "run history" : "empty"}
+                </span>
               </div>
-              <p>{session.summary}</p>
+              <h3>{session.title}</h3>
+              <p>{excerpt(session.summary, 160)}</p>
             </div>
-            <div className="status-strip">
-              <span className="status-pill">
-                {session.lastRunAt
-                  ? `last run ${new Date(session.lastRunAt).toLocaleString()}`
-                  : "no runs yet"}
-              </span>
+            <div className="story-footer">
+              <span className="story-kicker">Updated {formatDateTime(session.updatedAt)}</span>
+              <span className="story-kicker">{session.id.slice(0, 8)}</span>
             </div>
-            <div className="stack-inline">
+            <div className="button-row">
               <Link className="primary-button" href={`/sessions/${session.id}/chat`}>
                 Open chat
               </Link>
+              <Link className="ghost-button" href={`/sessions/${session.id}/execution`}>
+                Execution
+              </Link>
               <Link className="ghost-button" href={`/sessions/${session.id}/skills`}>
-                Configure skills
+                Skills
               </Link>
             </div>
           </article>

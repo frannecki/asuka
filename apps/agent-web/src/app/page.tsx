@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import { ChatShell } from "@/components/chat-shell";
 
 export default function Home() {
-  redirect("/dashboard");
+  return <ChatShell routeMode="root" />;
 }
