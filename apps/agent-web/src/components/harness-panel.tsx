@@ -12,6 +12,12 @@ import type {
   TaskExecutionDetail,
   ToolInvocationRecord,
 } from "@/lib/types";
+import {
+  compactId,
+  excerpt,
+  formatDateTime,
+  humanizeLabel,
+} from "@/lib/view";
 
 type HarnessPanelProps = {
   tasks: TaskRecord[];
@@ -46,12 +52,12 @@ export function HarnessPanel({
     <section className="panel stack-gap">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Harness</p>
-          <h2>Execution trace</h2>
+          <p className="eyebrow">Execution storyboard</p>
+          <h2>Plans, runs, steps, tools, lineage, and artifacts in one view</h2>
         </div>
         <div className="stack-inline">
-          {modelLabel ? <div className="status-pill">{modelLabel}</div> : null}
-          <div className="status-pill">{status}</div>
+          {modelLabel ? <span className="status-pill tone-sky">{modelLabel}</span> : null}
+          <span className="status-pill tone-sun">{humanizeLabel(status)}</span>
         </div>
       </div>
 
@@ -64,15 +70,15 @@ export function HarnessPanel({
               onClick={() => onSelectTaskId(task.id)}
               type="button"
             >
-              <strong>{task.title}</strong>
-              <span>{task.status}</span>
+              <strong>{excerpt(task.title, 46)}</strong>
+              <span>{humanizeLabel(task.status)}</span>
             </button>
           ))}
         </div>
       ) : (
         <div className="empty-state small">
-          No durable harness tasks yet. Post a message to generate a task, plan,
-          and persisted run steps.
+          No durable harness tasks yet. Post a message to generate a task,
+          plan, and persisted run steps.
         </div>
       )}
 
@@ -80,214 +86,223 @@ export function HarnessPanel({
         <>
           <article className="harness-summary-card">
             <div className="activity-topline">
-              <span className="activity-badge">task</span>
-              <span>{new Date(selectedTask.updatedAt).toLocaleTimeString()}</span>
+              <span className="activity-badge">Task</span>
+              <span>{formatDateTime(selectedTask.updatedAt)}</span>
             </div>
             <div className="activity-copy">
               <strong>{selectedTask.title}</strong>
-              <p>{selectedTask.summary}</p>
+              <p>{excerpt(selectedTask.summary || selectedTask.goal, 220)}</p>
             </div>
             <div className="status-strip">
-              <span className="status-pill">{selectedTask.status}</span>
+              <span className="status-pill tone-mint">{humanizeLabel(selectedTask.status)}</span>
               {selectedTask.latestRunId ? (
-                <span className="status-pill">run {selectedTask.latestRunId.slice(0, 8)}</span>
+                <span className="status-pill">Run {compactId(selectedTask.latestRunId)}</span>
               ) : null}
             </div>
           </article>
 
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Artifacts</p>
-                <h3>Artifact groups</h3>
+          <div className="harness-shell">
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Artifact groups</p>
+                  <h3>Output bundles by run</h3>
+                </div>
+              </div>
+              <div className="artifact-group-list">
+                {executionDetail?.artifactGroups.map((group) => (
+                  <article className="artifact-group-card" key={group.id}>
+                    <div className="activity-topline">
+                      <span className="activity-badge">Run {compactId(group.runId)}</span>
+                      <span>{formatDateTime(group.createdAt)}</span>
+                    </div>
+                    <div className="activity-copy">
+                      <strong>{group.title}</strong>
+                      <p>{excerpt(group.summary, 120)}</p>
+                    </div>
+                    <div className="status-strip">
+                      <span className="status-pill">{group.artifactIds.length} artifacts</span>
+                      {group.primaryArtifactId ? (
+                        <span className="status-pill">
+                          Primary {compactId(group.primaryArtifactId)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+                {executionDetail?.artifactGroups.length ? null : (
+                  <div className="empty-state small">
+                    Artifact groups appear when a run emits durable workspace outputs.
+                  </div>
+                )}
               </div>
             </div>
-            <div className="artifact-group-list">
-              {executionDetail?.artifactGroups.map((group) => (
-                <article className="artifact-group-card" key={group.id}>
-                  <div className="activity-topline">
-                    <span className="activity-badge">
-                      run {group.runId.slice(0, 8)}
-                    </span>
-                    <span>{new Date(group.createdAt).toLocaleTimeString()}</span>
+
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Run timeline</p>
+                  <h3>Grouped run history</h3>
+                </div>
+              </div>
+              <div className="timeline-group-list">
+                {executionDetail?.timelineGroups.map((group) => (
+                  <article className="timeline-group-card" key={group.id}>
+                    <div className="activity-topline">
+                      <span className="activity-badge">Run {compactId(group.run.id)}</span>
+                      <span>{humanizeLabel(group.run.status)}</span>
+                    </div>
+                    <div className="activity-copy">
+                      <strong>
+                        {group.run.selectedProvider ?? "Local runtime"} ·{" "}
+                        {group.run.selectedModel ?? "fallback"}
+                      </strong>
+                      <p>
+                        {group.runSteps.length} step(s), {group.toolInvocations.length} tool call(s),{" "}
+                        {group.artifacts.length} artifact(s)
+                      </p>
+                    </div>
+                    <div className="timeline-chip-row">
+                      {group.runSteps.map((step) => (
+                        <span className="timeline-chip" key={step.id}>
+                          #{step.sequence} {step.title}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="timeline-chip-row">
+                      {group.artifacts.map((artifact) => (
+                        <span className="timeline-chip artifact" key={artifact.id}>
+                          {artifact.displayName}
+                        </span>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+                {executionDetail?.timelineGroups.length ? null : (
+                  <div className="empty-state small">
+                    Grouped run history will appear here once the selected task
+                    has durable execution data.
                   </div>
-                  <div className="activity-copy">
-                    <strong>{group.title}</strong>
-                    <p>{group.summary}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Plan</p>
+                  <h3>Execution steps</h3>
+                </div>
+              </div>
+              <div className="plan-step-list">
+                {planDetail?.steps.map((step) => (
+                  <article className="plan-step-card" key={step.id}>
+                    <div className="activity-topline">
+                      <span className="activity-badge">Step {step.ordinal}</span>
+                      <span>{humanizeLabel(step.status)}</span>
+                    </div>
+                    <div className="activity-copy">
+                      <strong>{step.title}</strong>
+                      <p>{excerpt(step.description, 140)}</p>
+                    </div>
+                  </article>
+                ))}
+                {planDetail?.steps.length ? null : (
+                  <div className="empty-state small">
+                    No plan has been loaded for the selected task.
                   </div>
-                  <div className="status-strip">
-                    <span className="status-pill">{group.artifactIds.length} artifact(s)</span>
-                    {group.primaryArtifactId ? (
-                      <span className="status-pill">
-                        primary {group.primaryArtifactId.slice(0, 8)}
-                      </span>
+                )}
+              </div>
+            </div>
+
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Lineage</p>
+                  <h3>Execution graph</h3>
+                </div>
+              </div>
+              {executionDetail?.lineageEdges.length ? (
+                <ExecutionGraph
+                  edges={executionDetail.lineageEdges}
+                  nodes={executionDetail.lineageNodes}
+                />
+              ) : (
+                <div className="lineage-list">
+                  <div className="empty-state small">
+                    Execution graph nodes will appear here once runs produce
+                    artifacts or tool activity.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Durable steps</p>
+                  <h3>Persisted step history</h3>
+                </div>
+              </div>
+              <div className="run-step-list">
+                {runSteps.map((step) => (
+                  <article className="run-step-card" key={step.id}>
+                    <div className="activity-topline">
+                      <span className="activity-badge">#{step.sequence}</span>
+                      <span>{humanizeLabel(step.status)}</span>
+                    </div>
+                    <div className="activity-copy">
+                      <strong>{step.title}</strong>
+                      <p>{excerpt(step.inputSummary, 160)}</p>
+                    </div>
+                    {step.outputSummary ? (
+                      <details>
+                        <summary>Output summary</summary>
+                        <pre>{step.outputSummary}</pre>
+                      </details>
                     ) : null}
+                    {step.error ? <p className="error-copy">{step.error}</p> : null}
+                  </article>
+                ))}
+                {runSteps.length === 0 ? (
+                  <div className="empty-state small">
+                    Run steps will appear here once the selected task has a run.
                   </div>
-                </article>
-              ))}
-              {executionDetail?.artifactGroups.length ? null : (
-                <div className="empty-state small">
-                  Artifact groups appear when a run emits durable workspace
-                  outputs.
-                </div>
-              )}
+                ) : null}
+              </div>
             </div>
-          </div>
 
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Timeline</p>
-                <h3>Grouped run history</h3>
-              </div>
-            </div>
-            <div className="timeline-group-list">
-              {executionDetail?.timelineGroups.map((group) => (
-                <article className="timeline-group-card" key={group.id}>
-                  <div className="activity-topline">
-                    <span className="activity-badge">
-                      run {group.run.id.slice(0, 8)}
-                    </span>
-                    <span>{group.run.status}</span>
-                  </div>
-                  <div className="activity-copy">
-                    <strong>
-                      {group.run.selectedProvider ?? "Local runtime"} ·{" "}
-                      {group.run.selectedModel ?? "fallback"}
-                    </strong>
-                    <p>
-                      {group.runSteps.length} step(s), {group.toolInvocations.length}{" "}
-                      tool call(s), {group.artifacts.length} artifact(s)
-                    </p>
-                  </div>
-                  <div className="timeline-chip-row">
-                    {group.runSteps.map((step) => (
-                      <span className="timeline-chip" key={step.id}>
-                        #{step.sequence} {step.title}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="timeline-chip-row">
-                    {group.artifacts.map((artifact) => (
-                      <span className="timeline-chip artifact" key={artifact.id}>
-                        {artifact.displayName}
-                      </span>
-                    ))}
-                  </div>
-                </article>
-              ))}
-              {executionDetail?.timelineGroups.length ? null : (
-                <div className="empty-state small">
-                  Grouped run history will appear here once the selected task
-                  has durable execution data.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Plan</p>
-                <h3>Execution steps</h3>
-              </div>
-            </div>
-            <div className="plan-step-list">
-              {planDetail?.steps.map((step) => (
-                <article className="plan-step-card" key={step.id}>
-                  <div className="activity-topline">
-                    <span className="activity-badge">step {step.ordinal}</span>
-                    <span>{step.status}</span>
-                  </div>
-                  <div className="activity-copy">
-                    <strong>{step.title}</strong>
-                    <p>{step.description}</p>
-                  </div>
-                </article>
-              ))}
-              {planDetail?.steps.length ? null : (
-                <div className="empty-state small">
-                  No plan has been loaded for the selected task.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Lineage</p>
-                <h3>Execution graph</h3>
-              </div>
-            </div>
-            {executionDetail?.lineageEdges.length ? (
-              <ExecutionGraph
-                edges={executionDetail.lineageEdges}
-                nodes={executionDetail.lineageNodes}
-              />
-            ) : (
-              <div className="lineage-list">
-                <div className="empty-state small">
-                  Execution graph nodes will appear here once runs produce
-                  artifacts or tool activity.
+            <div className="harness-section">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Tools</p>
+                  <h3>Tool invocations</h3>
                 </div>
               </div>
-            )}
-          </div>
-
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Run Steps</p>
-                <h3>Durable step history</h3>
+              <div className="tool-invocation-list">
+                {toolInvocations.map((invocation) => (
+                  <article className="tool-invocation-card" key={invocation.id}>
+                    <div className="activity-topline">
+                      <span className="activity-badge">{invocation.toolName}</span>
+                      <span>{invocation.ok ? "ok" : "error"}</span>
+                    </div>
+                    <p>{humanizeLabel(invocation.toolSource)}</p>
+                    <details>
+                      <summary>Arguments</summary>
+                      <pre>{JSON.stringify(invocation.argumentsJson, null, 2)}</pre>
+                    </details>
+                    <details>
+                      <summary>Result</summary>
+                      <pre>{JSON.stringify(invocation.resultJson, null, 2)}</pre>
+                    </details>
+                  </article>
+                ))}
+                {toolInvocations.length === 0 ? (
+                  <div className="empty-state small">
+                    No persisted tool invocations for the selected run yet.
+                  </div>
+                ) : null}
               </div>
-            </div>
-            <div className="run-step-list">
-              {runSteps.map((step) => (
-                <article className="run-step-card" key={step.id}>
-                  <div className="activity-topline">
-                    <span className="activity-badge">#{step.sequence}</span>
-                    <span>{step.status}</span>
-                  </div>
-                  <div className="activity-copy">
-                    <strong>{step.title}</strong>
-                    <p>{step.inputSummary}</p>
-                  </div>
-                  {step.outputSummary ? <pre>{step.outputSummary}</pre> : null}
-                  {step.error ? <p className="error-copy">{step.error}</p> : null}
-                </article>
-              ))}
-              {runSteps.length === 0 ? (
-                <div className="empty-state small">
-                  Run steps will appear here once the selected task has a run.
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="harness-section">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Tools</p>
-                <h3>Tool invocations</h3>
-              </div>
-            </div>
-            <div className="tool-invocation-list">
-              {toolInvocations.map((invocation) => (
-                <article className="tool-invocation-card" key={invocation.id}>
-                  <div className="activity-topline">
-                    <span className="activity-badge">{invocation.toolName}</span>
-                    <span>{invocation.ok ? "ok" : "error"}</span>
-                  </div>
-                  <pre>{JSON.stringify(invocation.argumentsJson, null, 2)}</pre>
-                  <pre>{JSON.stringify(invocation.resultJson, null, 2)}</pre>
-                </article>
-              ))}
-              {toolInvocations.length === 0 ? (
-                <div className="empty-state small">
-                  No persisted tool invocations for the selected run yet.
-                </div>
-              ) : null}
             </div>
           </div>
         </>
@@ -296,8 +311,8 @@ export function HarnessPanel({
       <div className="harness-section">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Live Stream</p>
-            <h3>Streaming activity</h3>
+            <p className="eyebrow">Live stream</p>
+            <h3>Recent streaming activity</h3>
           </div>
         </div>
         <div className="activity-list compact">
@@ -311,7 +326,7 @@ export function HarnessPanel({
               >
                 <div className="activity-topline">
                   <span className="activity-badge">{descriptor.badge}</span>
-                  <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
+                  <span>{formatDateTime(event.timestamp)}</span>
                 </div>
                 <div className="activity-copy">
                   <strong>{descriptor.title}</strong>
@@ -425,7 +440,7 @@ function buildGraphLayout(nodes: LineageNodeRecord[]) {
   const columnConfig: Array<{ key: string; label: string; kinds: LineageNodeKind[] }> = [
     { key: "task", label: "Task", kinds: ["task"] },
     { key: "run", label: "Runs", kinds: ["run"] },
-    { key: "activity", label: "Steps and Tools", kinds: ["runStep", "toolInvocation"] },
+    { key: "activity", label: "Steps and tools", kinds: ["runStep", "toolInvocation"] },
     { key: "artifact", label: "Artifacts", kinds: ["artifact"] },
   ];
   const columnWidth = 220;
@@ -444,8 +459,8 @@ function buildGraphLayout(nodes: LineageNodeRecord[]) {
 
   for (const column of columns) {
     const columnNodes = nodes
-        .filter((node) => column.kinds.includes(node.kind))
-        .sort((left, right) => left.label.localeCompare(right.label));
+      .filter((node) => column.kinds.includes(node.kind))
+      .sort((left, right) => left.label.localeCompare(right.label));
 
     columnNodes.forEach((node, index) => {
       const entry = {

@@ -7,28 +7,47 @@ import {
   buildSessionWorkspaceRawUrl,
   buildSessionWorkspaceRenderUrl,
 } from "@/lib/api";
-import type { ArtifactRecord, WorkspaceNode } from "@/lib/types";
+import type { ArtifactRecord, TaskRecord, WorkspaceNode } from "@/lib/types";
+import {
+  compactId,
+  excerpt,
+  formatArtifactSize,
+  formatDateTime,
+  humanizeLabel,
+} from "@/lib/view";
 
 type WorkspacePanelProps = {
   artifacts: ArtifactRecord[];
+  error: string | null;
   sessionId: string | null;
+  tasks: TaskRecord[];
   tree: WorkspaceNode | null;
   selectedPath: string | null;
+  selectedTaskId: string | null;
   onSelectPath: (path: string) => void;
+  onSelectTaskId: (taskId: string | null) => void;
 };
 
 type PreviewMode = "directory" | "markdown" | "html" | "text" | "unsupported" | "empty";
 
 export function WorkspacePanel({
   artifacts,
+  error,
   sessionId,
+  tasks,
   tree,
   selectedPath,
+  selectedTaskId,
   onSelectPath,
+  onSelectTaskId,
 }: WorkspacePanelProps) {
   const [textPreview, setTextPreview] = useState<string>("");
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
+    [selectedTaskId, tasks],
+  );
   const selectedNode = useMemo(
     () => (tree && selectedPath ? findWorkspaceNode(tree, selectedPath) : null),
     [tree, selectedPath],
@@ -38,9 +57,19 @@ export function WorkspacePanel({
     [artifacts, selectedPath],
   );
   const previewMode = getPreviewMode(selectedNode, selectedArtifact);
+  const previewLabel = describePreviewMode(previewMode);
+  const rawHref =
+    sessionId && selectedPath ? buildSessionWorkspaceRawUrl(sessionId, selectedPath) : null;
+  const renderedHref =
+    sessionId && selectedPath && (previewMode === "markdown" || previewMode === "html")
+      ? previewMode === "markdown"
+        ? buildSessionWorkspaceRenderUrl(sessionId, selectedPath)
+        : buildSessionWorkspaceRawUrl(sessionId, selectedPath)
+      : null;
+  const workspaceFileCount = useMemo(() => countWorkspaceFiles(tree), [tree]);
 
   useEffect(() => {
-    if (!sessionId || !selectedPath || previewMode !== "text") {
+    if (previewMode !== "text" || !sessionId || !selectedPath) {
       return;
     }
 
@@ -64,13 +93,13 @@ export function WorkspacePanel({
         setTextPreview(content);
         setPreviewError(null);
       })
-      .catch((error: unknown) => {
+      .catch((nextError: unknown) => {
         if (cancelled) {
           return;
         }
 
         setPreviewError(
-          error instanceof Error ? error.message : "Failed to preview workspace file.",
+          nextError instanceof Error ? nextError.message : "Failed to preview workspace file.",
         );
       });
 
@@ -80,202 +109,360 @@ export function WorkspacePanel({
   }, [previewMode, selectedPath, sessionId]);
 
   return (
-    <section className="panel stack-gap">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Workspace</p>
-          <h2>Session artifacts</h2>
-        </div>
-      </div>
+    <div className="workspace-shell-outer stack-gap">
+      <section className="artifact-shell">
+        <aside className="artifact-sidebar">
+          <div className="artifact-sidebar-head">
+            <div>
+              <p className="eyebrow">Artifact index</p>
+              <h2>Workspace outputs</h2>
+            </div>
+            <span className="status-pill tone-sky">{artifacts.length} files</span>
+          </div>
 
-      <div className="workspace-shell">
-        <div className="workspace-tree">
-          <div className="workspace-artifact-list">
-            {artifacts.length > 0 ? (
-              artifacts.map((artifact) => (
+          {tasks.length > 0 ? (
+            <section className="artifact-sidebar-section">
+              <div className="artifact-section-head">
+                <div>
+                  <p className="eyebrow">Task lane</p>
+                  <h3>{selectedTask ? excerpt(selectedTask.title, 30) : "All outputs"}</h3>
+                </div>
+              </div>
+              <div className="artifact-task-filter">
                 <button
-                  className={`artifact-card${
-                    selectedPath === artifact.path ? " is-active" : ""
-                  }`}
-                  key={artifact.id}
-                  onClick={() => onSelectPath(artifact.path)}
+                  className={`rail-task-button${selectedTaskId === null ? " is-active" : ""}`}
+                  onClick={() => onSelectTaskId(null)}
                   type="button"
                 >
-                  <header>
-                    <span className={`artifact-kind artifact-${artifact.kind}`}>
-                      {artifact.kind}
-                    </span>
-                    <strong>{artifact.displayName}</strong>
-                  </header>
-                  <p>{artifact.description}</p>
-                  <footer>
-                    <span>{artifact.path}</span>
-                    <span>{formatArtifactSize(artifact.sizeBytes)}</span>
-                  </footer>
+                  All outputs
                 </button>
-              ))
-            ) : (
-              <div className="empty-state small">
-                No durable artifact records yet. Completed runs will register
-                report, markdown, and JSON outputs here.
+                {tasks.map((task) => (
+                  <button
+                    className={`rail-task-button${
+                      task.id === selectedTaskId ? " is-active" : ""
+                    }`}
+                    key={task.id}
+                    onClick={() => onSelectTaskId(task.id)}
+                    type="button"
+                  >
+                    {excerpt(task.title, 24)}
+                  </button>
+                ))}
               </div>
-            )}
-          </div>
-
-          {tree?.children.length ? (
-            tree.children.map((node) => (
-              <WorkspaceTreeNode
-                key={node.path || node.name}
-                node={node}
-                onSelectPath={onSelectPath}
-                selectedPath={selectedPath}
-              />
-            ))
-          ) : (
-            <div className="empty-state small">
-              No session workspace files yet. Completed runs will emit markdown,
-              JSON, and HTML artifacts here.
-            </div>
-          )}
-        </div>
-
-        <div className="workspace-preview">
-          <header className="workspace-preview-header">
-            <strong>{selectedNode?.name ?? "No file selected"}</strong>
-            {selectedNode?.path ? <span>{selectedNode.path}</span> : null}
-          </header>
-          {selectedArtifact ? (
-            <div className="workspace-preview-meta">
-              <span>{selectedArtifact.displayName}</span>
-              <span>{selectedArtifact.kind}</span>
-              <span>{formatArtifactSize(selectedArtifact.sizeBytes)}</span>
-            </div>
+            </section>
           ) : null}
 
-          {previewMode === "markdown" && sessionId && selectedPath ? (
-            <iframe
-              className="workspace-frame"
-              src={buildSessionWorkspaceRenderUrl(sessionId, selectedPath)}
-              title={selectedPath}
-            />
-          ) : null}
-
-          {previewMode === "html" && sessionId && selectedPath ? (
-            <iframe
-              className="workspace-frame"
-              src={buildSessionWorkspaceRawUrl(sessionId, selectedPath)}
-              title={selectedPath}
-            />
-          ) : null}
-
-          {previewMode === "text" ? (
-            previewError ? (
-              <p className="error-copy">{previewError}</p>
-            ) : (
-              <pre className="workspace-text-preview">{textPreview}</pre>
-            )
-          ) : null}
-
-          {previewMode === "directory" ? (
-            <div className="empty-state small">
-              Select a file to preview it here. Markdown opens as rendered
-              content, HTML opens in an iframe, and JSON/text opens inline.
-            </div>
-          ) : null}
-
-          {previewMode === "unsupported" ? (
-            <div className="empty-state small">
-              This file type is available in the tree but does not have an
-              inline preview yet.
-            </div>
-          ) : null}
-
-          {previewMode === "empty" ? (
-            <div className="empty-state small">
-              Select a generated artifact to inspect the session workspace.
-            </div>
-          ) : null}
-        </div>
-
-        <div className="workspace-meta">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Metadata</p>
-              <h3>{selectedArtifact?.displayName ?? "Artifact details"}</h3>
-            </div>
-          </div>
-
-          {selectedArtifact ? (
-            <div className="workspace-meta-list">
-              <div className="workspace-meta-row">
-                <span>Kind</span>
-                <strong>{selectedArtifact.kind}</strong>
+          <section className="artifact-sidebar-section is-fill">
+            <div className="artifact-section-head">
+              <div>
+                <p className="eyebrow">Artifacts</p>
+                <h3>Durable files</h3>
               </div>
-              <div className="workspace-meta-row">
-                <span>Render mode</span>
-                <strong>{selectedArtifact.renderMode}</strong>
+              <span className="artifact-section-count">{artifacts.length}</span>
+            </div>
+            <div className="artifact-list-scroll">
+              {artifacts.length > 0 ? (
+                artifacts.map((artifact) => (
+                  <button
+                    className={`artifact-list-item${
+                      selectedPath === artifact.path ? " is-active" : ""
+                    }`}
+                    key={artifact.id}
+                    onClick={() => onSelectPath(artifact.path)}
+                    type="button"
+                  >
+                    <div className="artifact-list-item-head">
+                      <span className={`artifact-kind artifact-${artifact.kind}`}>
+                        {artifact.kind}
+                      </span>
+                      <span className="artifact-item-size">
+                        {formatArtifactSize(artifact.sizeBytes)}
+                      </span>
+                    </div>
+                    <strong>{artifact.displayName}</strong>
+                    <p>{excerpt(artifact.description, 92)}</p>
+                    <div className="artifact-item-meta">
+                      <span>{compactId(artifact.runId)}</span>
+                      <span>{artifact.renderMode}</span>
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="empty-state small">
+                  Completed runs will register durable reports, markdown files,
+                  and JSON outputs here.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="artifact-sidebar-section">
+            <div className="artifact-section-head">
+              <div>
+                <p className="eyebrow">Workspace tree</p>
+                <h3>All files</h3>
               </div>
-              <div className="workspace-meta-row">
-                <span>Media type</span>
-                <strong>{selectedArtifact.mediaType}</strong>
+              <span className="artifact-section-count">{workspaceFileCount}</span>
+            </div>
+            <div className="artifact-tree-scroll">
+              {tree?.children.length ? (
+                tree.children.map((node) => (
+                  <WorkspaceTreeNode
+                    key={node.path || node.name}
+                    node={node}
+                    onSelectPath={onSelectPath}
+                    selectedPath={selectedPath}
+                  />
+                ))
+              ) : (
+                <div className="empty-state small">
+                  The workspace tree will populate as soon as the runtime writes
+                  files into this session.
+                </div>
+              )}
+            </div>
+          </section>
+        </aside>
+
+        <section className="artifact-main">
+          <div className="artifact-main-head">
+            <div className="artifact-title-block">
+              <p className="eyebrow">Preview canvas</p>
+              <h2>{selectedArtifact?.displayName ?? selectedNode?.name ?? "Select an output"}</h2>
+              <p>
+                {selectedArtifact
+                  ? excerpt(selectedArtifact.description, 160)
+                  : selectedNode?.path ??
+                    "Select an artifact or workspace file to inspect its contents."}
+              </p>
+              {error ? <p className="error-copy command-error-inline">{error}</p> : null}
+            </div>
+            <div className="artifact-stats">
+              <div className="command-stat">
+                <span>Selection</span>
+                <strong>
+                  {selectedArtifact
+                    ? humanizeLabel(selectedArtifact.kind)
+                    : selectedNode
+                      ? humanizeLabel(selectedNode.kind)
+                      : "Waiting"}
+                </strong>
               </div>
-              <div className="workspace-meta-row">
-                <span>Path</span>
-                <strong>{selectedArtifact.path}</strong>
+              <div className="command-stat">
+                <span>Preview</span>
+                <strong>{previewLabel}</strong>
               </div>
-              <div className="workspace-meta-row">
-                <span>Size</span>
-                <strong>{formatArtifactSize(selectedArtifact.sizeBytes)}</strong>
-              </div>
-              <div className="workspace-meta-row">
+              <div className="command-stat">
                 <span>Task</span>
-                <strong>{selectedArtifact.taskId.slice(0, 8)}</strong>
+                <strong>
+                  {selectedArtifact
+                    ? compactId(selectedArtifact.taskId)
+                    : selectedTask
+                      ? compactId(selectedTask.id)
+                      : "All"}
+                </strong>
               </div>
-              <div className="workspace-meta-row">
-                <span>Run</span>
-                <strong>{selectedArtifact.runId.slice(0, 8)}</strong>
+              <div className="command-stat">
+                <span>Outputs</span>
+                <strong>{artifacts.length}</strong>
               </div>
-              <div className="workspace-meta-row">
-                <span>Updated</span>
-                <strong>{new Date(selectedArtifact.updatedAt).toLocaleString()}</strong>
-              </div>
+            </div>
+          </div>
 
-              <article className="workspace-lineage-card">
-                <p className="eyebrow">Lineage</p>
-                <p>{selectedArtifact.description}</p>
-                {selectedArtifact.producerKind ? (
-                  <p className="hint-copy">
-                    Produced by {selectedArtifact.producerKind}{" "}
-                    {selectedArtifact.producerRefId
-                      ? selectedArtifact.producerRefId.slice(0, 8)
-                      : ""}
-                  </p>
+          <div className="artifact-preview-board">
+            <div className="artifact-preview-toolbar">
+              {selectedArtifact ? (
+                <span className={`artifact-kind artifact-${selectedArtifact.kind}`}>
+                  {selectedArtifact.kind}
+                </span>
+              ) : null}
+              {selectedArtifact ? (
+                <span className="status-pill">{selectedArtifact.renderMode}</span>
+              ) : null}
+              {selectedNode?.path ? (
+                <span className="artifact-path-label">{selectedNode.path}</span>
+              ) : null}
+            </div>
+
+            <div
+              className={`artifact-preview-stage${
+                previewMode === "markdown" || previewMode === "html" ? " is-embedded" : ""
+              }`}
+            >
+              {previewMode === "markdown" && sessionId && selectedPath ? (
+                <iframe
+                  className="workspace-frame"
+                  src={buildSessionWorkspaceRenderUrl(sessionId, selectedPath)}
+                  title={selectedPath}
+                />
+              ) : null}
+
+              {previewMode === "html" && sessionId && selectedPath ? (
+                <iframe
+                  className="workspace-frame"
+                  src={buildSessionWorkspaceRawUrl(sessionId, selectedPath)}
+                  title={selectedPath}
+                />
+              ) : null}
+
+              {previewMode === "text" ? (
+                previewError ? (
+                  <p className="error-copy">{previewError}</p>
                 ) : (
-                  <p className="hint-copy">
-                    Producer metadata has not been attached to this artifact.
-                  </p>
-                )}
-                {sessionId ? (
-                  <div className="button-row">
-                    <Link className="ghost-button" href={`/sessions/${sessionId}/execution`}>
-                      View execution graph
-                    </Link>
-                    <Link className="ghost-button" href={`/sessions/${sessionId}/chat`}>
-                      Back to chat
-                    </Link>
-                  </div>
-                ) : null}
-              </article>
+                  <pre className="workspace-text-preview">{textPreview}</pre>
+                )
+              ) : null}
+
+              {previewMode === "directory" ? (
+                <div className="empty-state">
+                  Open a file from the tree to preview it here. Markdown renders
+                  inline, HTML opens in a frame, and JSON or text shows as code.
+                </div>
+              ) : null}
+
+              {previewMode === "unsupported" ? (
+                <div className="empty-state">
+                  This file exists in the workspace, but there is no inline
+                  renderer for its type yet.
+                </div>
+              ) : null}
+
+              {previewMode === "empty" ? (
+                <div className="empty-state">
+                  Select an artifact from the left to inspect what the runtime
+                  wrote into this session workspace.
+                </div>
+              ) : null}
             </div>
-          ) : (
-            <div className="empty-state small">
-              Select an artifact to inspect its metadata, producer, and related
-              workspace provenance.
+          </div>
+        </section>
+
+        <aside className="artifact-rail">
+          <div className="artifact-rail-head">
+            <div>
+              <p className="eyebrow">Artifact monitor</p>
+              <h2>Selection details</h2>
             </div>
-          )}
-        </div>
-      </div>
-    </section>
+            <span className="status-pill tone-sun">{previewLabel}</span>
+          </div>
+
+          <div className="rail-summary">
+            <div className="rail-summary-item">
+              <span>Kind</span>
+              <strong>
+                {selectedArtifact
+                  ? humanizeLabel(selectedArtifact.kind)
+                  : selectedNode
+                    ? humanizeLabel(selectedNode.kind)
+                    : "None"}
+              </strong>
+            </div>
+            <div className="rail-summary-item">
+              <span>Size</span>
+              <strong>
+                {selectedArtifact ? formatArtifactSize(selectedArtifact.sizeBytes) : "n/a"}
+              </strong>
+            </div>
+            <div className="rail-summary-item">
+              <span>Task</span>
+              <strong>
+                {selectedArtifact
+                  ? compactId(selectedArtifact.taskId)
+                  : selectedTask
+                    ? compactId(selectedTask.id)
+                    : "All"}
+              </strong>
+            </div>
+            <div className="rail-summary-item">
+              <span>Run</span>
+              <strong>{selectedArtifact ? compactId(selectedArtifact.runId) : "n/a"}</strong>
+            </div>
+          </div>
+
+          <section className="rail-section">
+            <div className="rail-section-head">
+              <div>
+                <p className="eyebrow">Path</p>
+                <h3>{selectedNode?.name ?? selectedArtifact?.displayName ?? "No selection"}</h3>
+              </div>
+            </div>
+            <div className="artifact-rail-list">
+              <div className="artifact-rail-row">
+                <span>Workspace path</span>
+                <strong>{selectedNode?.path ?? selectedArtifact?.path ?? "Not selected"}</strong>
+              </div>
+              <div className="artifact-rail-row">
+                <span>Updated</span>
+                <strong>
+                  {selectedArtifact ? formatDateTime(selectedArtifact.updatedAt) : "Waiting"}
+                </strong>
+              </div>
+              <div className="artifact-rail-row">
+                <span>Media type</span>
+                <strong>{selectedArtifact?.mediaType ?? "workspace file"}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="rail-section">
+            <div className="rail-section-head">
+              <div>
+                <p className="eyebrow">Lineage</p>
+                <h3>Producer trail</h3>
+              </div>
+            </div>
+            <p className="rail-copy">
+              {selectedArtifact
+                ? excerpt(selectedArtifact.description, 140)
+                : "Artifact metadata will appear here when a generated output is selected."}
+            </p>
+            <div className="artifact-rail-list">
+              <div className="artifact-rail-row">
+                <span>Producer</span>
+                <strong>
+                  {selectedArtifact?.producerKind
+                    ? selectedArtifact.producerRefId
+                      ? `${selectedArtifact.producerKind} ${compactId(selectedArtifact.producerRefId)}`
+                      : selectedArtifact.producerKind
+                    : "Not attached"}
+                </strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="rail-section">
+            <div className="rail-section-head">
+              <div>
+                <p className="eyebrow">Quick actions</p>
+                <h3>Open routes</h3>
+              </div>
+            </div>
+            <div className="artifact-actions">
+              {renderedHref ? (
+                <a className="ghost-button" href={renderedHref} rel="noreferrer" target="_blank">
+                  Open render
+                </a>
+              ) : null}
+              {rawHref ? (
+                <a className="ghost-button" href={rawHref} rel="noreferrer" target="_blank">
+                  Open raw file
+                </a>
+              ) : null}
+              {sessionId ? (
+                <Link className="ghost-button" href={`/sessions/${sessionId}/execution`}>
+                  View execution
+                </Link>
+              ) : null}
+              {sessionId ? (
+                <Link className="ghost-button" href={`/sessions/${sessionId}/chat`}>
+                  Back to chat
+                </Link>
+              ) : null}
+            </div>
+          </section>
+        </aside>
+      </section>
+    </div>
   );
 }
 
@@ -301,10 +488,10 @@ function WorkspaceTreeNode({
             onSelectPath(node.path);
           }
         }}
-        style={{ paddingLeft: `${12 + depth * 14}px` }}
+        style={{ paddingLeft: `${14 + depth * 16}px` }}
         type="button"
       >
-        <span>{node.kind === "directory" ? "dir" : "file"}</span>
+        <small>{node.kind === "directory" ? "dir" : "file"}</small>
         <strong>{node.name}</strong>
       </button>
       {node.children.map((child) => (
@@ -333,6 +520,16 @@ function findWorkspaceNode(node: WorkspaceNode, path: string): WorkspaceNode | n
   }
 
   return null;
+}
+
+function countWorkspaceFiles(node: WorkspaceNode | null): number {
+  if (!node) {
+    return 0;
+  }
+
+  return node.kind === "file"
+    ? 1
+    : node.children.reduce((total, child) => total + countWorkspaceFiles(child), 0);
 }
 
 function getPreviewMode(
@@ -377,14 +574,21 @@ function getPreviewMode(
   return "unsupported";
 }
 
-function formatArtifactSize(sizeBytes: number): string {
-  if (sizeBytes < 1024) {
-    return `${sizeBytes} B`;
+function describePreviewMode(previewMode: PreviewMode): string {
+  switch (previewMode) {
+    case "markdown":
+      return "Rendered";
+    case "html":
+      return "Live HTML";
+    case "text":
+      return "Code view";
+    case "directory":
+      return "Folder";
+    case "unsupported":
+      return "Unsupported";
+    case "empty":
+      return "Waiting";
   }
-  if (sizeBytes < 1024 * 1024) {
-    return `${(sizeBytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function pickDefaultWorkspacePath(tree: WorkspaceNode | null): string | null {

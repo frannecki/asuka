@@ -95,7 +95,42 @@ export function SessionExecutionView({ sessionId }: SessionExecutionViewProps) {
 
   return (
     <div className="stack-gap">
-      {error ? <p className="error-copy">{error}</p> : null}
+      <section className="hero-shell panel">
+        <div className="hero-copy">
+          <div>
+            <p className="eyebrow">Session execution</p>
+            <h2>Inspect the durable harness trail behind this workspace.</h2>
+          </div>
+          <p>
+            This view is populated from task execution detail endpoints, grouped
+            runs, persisted run steps, tool invocations, artifact groups, and
+            lineage data.
+          </p>
+          {error ? <p className="error-copy">{error}</p> : null}
+        </div>
+
+        <div className="hero-art">
+          <div className="hero-stat-strip">
+            <article className="hero-stat">
+              <strong>{tasks.length}</strong>
+              <span>task records</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{executionDetail?.timelineGroups.length ?? 0}</strong>
+              <span>timeline groups</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{planDetail?.steps.length ?? 0}</strong>
+              <span>plan steps</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{toolInvocations.length}</strong>
+              <span>visible tool calls</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <HarnessPanel
         activeTaskId={activeTaskId}
         activity={[]}

@@ -9,6 +9,7 @@ import {
   testMcpServer,
 } from "@/lib/api";
 import type { McpServerRecord } from "@/lib/types";
+import { humanizeLabel } from "@/lib/view";
 
 export function McpPanel() {
   const [servers, setServers] = useState<McpServerRecord[]>([]);
@@ -16,36 +17,105 @@ export function McpPanel() {
   const [transport, setTransport] = useState("stdio");
   const [command, setCommand] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void listMcpServers().then(setServers);
+    let cancelled = false;
+
+    void listMcpServers()
+      .then((nextServers) => {
+        if (!cancelled) {
+          setServers(nextServers);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (!cancelled) {
+          setError(
+            loadError instanceof Error ? loadError.message : "Failed to load MCP servers.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const created = await createMcpServer({ name, transport, command });
-    setServers((current) => [created, ...current]);
-    setName("");
-    setTransport("stdio");
-    setCommand("");
+
+    try {
+      const created = await createMcpServer({ name, transport, command });
+      setServers((current) => [created, ...current]);
+      setName("");
+      setTransport("stdio");
+      setCommand("");
+      setError(null);
+    } catch (createError) {
+      setError(
+        createError instanceof Error
+          ? createError.message
+          : "Failed to create MCP server.",
+      );
+    }
   }
 
   async function handleTest(serverId: string) {
-    const result = await testMcpServer(serverId);
-    setFeedback(result.message);
+    try {
+      const result = await testMcpServer(serverId);
+      setFeedback(result.message);
+      setError(null);
+    } catch (testError) {
+      setError(
+        testError instanceof Error ? testError.message : "Failed to test MCP server.",
+      );
+    }
   }
 
   async function handleCapabilities(serverId: string) {
-    const result = await getMcpCapabilities(serverId);
-    setFeedback(`Capabilities: ${result.capabilities.join(", ")}`);
+    try {
+      const result = await getMcpCapabilities(serverId);
+      setFeedback(`Capabilities: ${result.capabilities.join(", ")}`);
+      setError(null);
+    } catch (capabilityError) {
+      setError(
+        capabilityError instanceof Error
+          ? capabilityError.message
+          : "Failed to load MCP capabilities.",
+      );
+    }
   }
 
   return (
     <div className="stack-gap">
+      <section className="hero-shell panel">
+        <div className="hero-copy">
+          <div>
+            <p className="eyebrow">MCP servers</p>
+            <h2>Track external tool surfaces and inspect their capabilities.</h2>
+          </div>
+          <p>
+            The frontend registers MCP servers, probes connectivity, and pulls
+            capability lists directly from the backend integration layer.
+          </p>
+          {feedback ? <p className="status-pill tone-mint">{feedback}</p> : null}
+          {error ? <p className="error-copy">{error}</p> : null}
+        </div>
+
+        <div className="hero-art">
+          <div className="hero-stat-strip">
+            <article className="hero-stat">
+              <strong>{servers.length}</strong>
+              <span>registered servers</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section className="panel stack-gap">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">MCP</p>
+            <p className="eyebrow">Register</p>
             <h2>Server registry</h2>
           </div>
         </div>
@@ -78,18 +148,17 @@ export function McpPanel() {
             Register MCP server
           </button>
         </form>
-        {feedback ? <p className="hint-copy">{feedback}</p> : null}
       </section>
 
-      <section className="grid-cards">
+      <section className="catalog-grid">
         {servers.map((server) => (
-          <article className="panel stack-gap" key={server.id}>
+          <article className="catalog-card" key={server.id}>
             <div className="panel-header">
               <div>
                 <p className="eyebrow">{server.transport}</p>
-                <h2>{server.name}</h2>
+                <h3>{server.name}</h3>
               </div>
-              <span className="status-pill">{server.status}</span>
+              <span className="status-pill">{humanizeLabel(server.status)}</span>
             </div>
             <p>{server.command}</p>
             <div className="button-row">

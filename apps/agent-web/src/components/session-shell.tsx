@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   getSession,
   listSessionArtifacts,
+  listSessions,
   listTasks,
   updateSession,
 } from "@/lib/api";
@@ -14,8 +15,10 @@ import { duplicateSessionWorkspace } from "@/lib/session-duplication";
 import type {
   ArtifactRecord,
   SessionDetail,
+  SessionRecord,
   TaskRecord,
 } from "@/lib/types";
+import { excerpt, formatModelLabel, humanizeLabel } from "@/lib/view";
 
 type SessionShellProps = {
   sessionId: string;
@@ -35,55 +38,59 @@ export function SessionShell({ sessionId, children }: SessionShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [sessionRecord, setSessionRecord] = useState<SessionRecord | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [railCollapsed, setRailCollapsed] = useState(false);
 
   const refresh = useCallback(async () => {
-    try {
-      const [nextDetail, nextTasks, nextArtifacts] = await Promise.all([
+    const [detailResult, tasksResult, artifactsResult, sessionsResult] =
+      await Promise.allSettled([
         getSession(sessionId),
         listTasks(sessionId),
         listSessionArtifacts(sessionId),
+        listSessions(),
       ]);
-      setDetail(nextDetail);
-      setTasks(nextTasks);
-      setArtifacts(nextArtifacts);
-      setError(null);
-    } catch (loadError) {
-      setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Failed to load session workspace.",
-      );
-    }
+
+    setDetail(detailResult.status === "fulfilled" ? detailResult.value : null);
+    setTasks(tasksResult.status === "fulfilled" ? tasksResult.value : []);
+    setArtifacts(artifactsResult.status === "fulfilled" ? artifactsResult.value : []);
+    setSessionRecord(
+      sessionsResult.status === "fulfilled"
+        ? sessionsResult.value.find((session) => session.id === sessionId) ?? null
+        : null,
+    );
+
+    const rejectedResult = [detailResult, tasksResult, artifactsResult].find(
+      (result) => result.status === "rejected",
+    );
+
+    setError(
+      rejectedResult?.status === "rejected"
+        ? rejectedResult.reason instanceof Error
+          ? rejectedResult.reason.message
+          : "Failed to load session workspace."
+        : null,
+    );
   }, [sessionId]);
 
   useEffect(() => {
     void refresh();
 
-    const handleSkillUpdate = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
-      if (detail?.sessionId === sessionId) {
-        void refresh();
-      }
-    };
-
     const handleSessionUpdate = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
-      if (detail?.sessionId === sessionId) {
+      const payload = (event as CustomEvent<{ sessionId?: string }>).detail;
+      if (payload?.sessionId === sessionId) {
         void refresh();
       }
     };
 
-    window.addEventListener("asuka:session-skills-updated", handleSkillUpdate);
     window.addEventListener("asuka:session-updated", handleSessionUpdate);
+    window.addEventListener("asuka:session-skills-updated", handleSessionUpdate);
 
     return () => {
-      window.removeEventListener("asuka:session-skills-updated", handleSkillUpdate);
       window.removeEventListener("asuka:session-updated", handleSessionUpdate);
+      window.removeEventListener("asuka:session-skills-updated", handleSessionUpdate);
     };
   }, [refresh, sessionId]);
 
@@ -111,43 +118,11 @@ export function SessionShell({ sessionId, children }: SessionShellProps) {
           : current,
       );
       emitSessionUpdated(sessionId);
-      setError(null);
     } catch (actionError) {
       setError(
         actionError instanceof Error
           ? actionError.message
           : "Failed to rename this session.",
-      );
-    } finally {
-      setBusyKey(null);
-    }
-  }
-
-  async function handleToggleArchive() {
-    if (!detail) {
-      return;
-    }
-
-    setBusyKey("archive");
-    try {
-      const updated = await updateSession(sessionId, {
-        status: detail.session.status === "archived" ? "active" : "archived",
-      });
-      setDetail((current) =>
-        current
-          ? {
-              ...current,
-              session: updated,
-            }
-          : current,
-      );
-      emitSessionUpdated(sessionId);
-      setError(null);
-    } catch (actionError) {
-      setError(
-        actionError instanceof Error
-          ? actionError.message
-          : "Failed to update the session status.",
       );
     } finally {
       setBusyKey(null);
@@ -165,7 +140,6 @@ export function SessionShell({ sessionId, children }: SessionShellProps) {
         sessionId,
         `${detail.session.title} copy`,
       );
-      setError(null);
       router.push(`/sessions/${duplicate.id}/chat`);
     } catch (actionError) {
       setError(
@@ -178,184 +152,39 @@ export function SessionShell({ sessionId, children }: SessionShellProps) {
     }
   }
 
-  const latestRun = detail?.latestRunSummary ?? null;
-  const activeRun = detail?.activeRunSummary ?? null;
-  const activeTask = detail?.activeTaskSummary ?? null;
-  const streamCheckpoint = detail?.latestStreamCheckpointSummary ?? null;
-  const latestModelLabel =
-    latestRun?.selectedProvider && latestRun?.selectedModel
-      ? `${latestRun.selectedProvider} · ${latestRun.selectedModel}`
-      : latestRun?.selectedModel ?? latestRun?.selectedProvider ?? null;
-  const recentTasks = tasks.slice(0, 4);
-  const recentArtifacts = artifacts.slice(0, 5);
-  const pinnedNames = detail?.skillSummary.pinnedSkills.map((skill) => skill.name) ?? [];
+  const latestModelLabel = formatModelLabel(
+    detail?.latestRunSummary?.selectedProvider,
+    detail?.latestRunSummary?.selectedModel,
+  );
+  const displaySession = detail?.session ?? sessionRecord;
 
   return (
-    <div className="session-workspace">
-      <aside className={`panel session-nav-rail${railCollapsed ? " is-collapsed" : ""}`}>
-        <div className="session-rail-topline">
-          <div>
-            <p className="eyebrow">Workspace</p>
-            <h2>{detail?.session.title ?? "Loading session"}</h2>
-          </div>
-          <button
-            className="ghost-button"
-            onClick={() => setRailCollapsed((current) => !current)}
-            type="button"
-          >
-            {railCollapsed ? "Expand" : "Collapse"}
-          </button>
-        </div>
-
-        {!railCollapsed ? (
-          <>
-            <p className="hint-copy">
-              {detail?.session.summary ??
-                "This session owns its own chat, execution history, artifacts, memory, and skills."}
-            </p>
-
-            <nav className="session-nav-list">
-              {sessionNav.map((item) => {
-                const href = `/sessions/${sessionId}${item.suffix}`;
-                const isActive = pathname === href;
-
-                return (
-                  <Link
-                    className={`session-nav-link${isActive ? " is-active" : ""}`}
-                    href={href}
-                    key={href}
-                  >
-                    {item.label}
-                  </Link>
-                );
-              })}
-            </nav>
-
-            <div className="session-meta-card">
-              <div className="status-strip">
-                <span className="status-pill">{detail?.session.status ?? "loading"}</span>
-                <span className="status-pill">
-                  {detail?.skillSummary.effectiveSkillCount ?? 0} skill(s)
-                </span>
-              </div>
-              {latestModelLabel ? <p className="hint-copy">{latestModelLabel}</p> : null}
-              {activeRun ? (
-                <div className="status-strip">
-                  <span className="status-pill">{activeRun.status}</span>
-                  <span className="status-pill">{activeRun.streamStatus}</span>
-                </div>
-              ) : null}
-              {pinnedNames.length > 0 ? (
-                <div className="session-chip-list">
-                  {pinnedNames.map((name) => (
-                    <span className="timeline-chip artifact" key={name}>
-                      {name}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="session-rail-section">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">Recent tasks</p>
-                  <h3>Session focus</h3>
-                </div>
-              </div>
-              <div className="session-rail-list">
-                {recentTasks.map((task) => (
-                  <Link
-                    className="session-rail-link"
-                    href={`/sessions/${sessionId}/execution`}
-                    key={task.id}
-                  >
-                    <strong>{task.title}</strong>
-                    <span>{task.status}</span>
-                  </Link>
-                ))}
-                {recentTasks.length === 0 ? (
-                  <div className="empty-state small">
-                    Post a message to create the first task in this workspace.
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="session-rail-section">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">Recent artifacts</p>
-                  <h3>Workspace outputs</h3>
-                </div>
-              </div>
-              <div className="session-rail-list">
-                {recentArtifacts.map((artifact) => (
-                  <Link
-                    className="session-rail-link"
-                    href={`/sessions/${sessionId}/artifacts`}
-                    key={artifact.id}
-                  >
-                    <strong>{artifact.displayName}</strong>
-                    <span>{artifact.kind}</span>
-                  </Link>
-                ))}
-                {recentArtifacts.length === 0 ? (
-                  <div className="empty-state small">
-                    Artifact previews appear here after a run writes workspace files.
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </>
-        ) : null}
-
-        <div className="stack-inline">
-          <Link className="ghost-button" href="/sessions">
-            All sessions
-          </Link>
-          <Link className="ghost-button" href="/dashboard">
-            Dashboard
-          </Link>
-        </div>
-      </aside>
-
-      <div className="session-content-shell">
-        {error ? <p className="error-copy">{error}</p> : null}
-        <section className="panel session-header-panel">
-          <div className="session-header-main">
+    <div className="session-stage">
+      <section className="session-toolbar">
+        <div className="session-toolbar-row">
+          <div className="session-toolbar-main">
+            <span className="workspace-title-icon">A</span>
             <div>
-              <p className="eyebrow">Session workspace</p>
-              <h2>{detail?.session.title ?? "Loading session"}</h2>
+              <p className="eyebrow">Session</p>
+              <h1>{displaySession?.title ?? "Session workspace"}</h1>
+              <p>
+                {displaySession?.summary
+                  ? excerpt(displaySession.summary, 130)
+                  : "This session owns its own transcript, runs, artifacts, memory, and settings."}
+              </p>
             </div>
-            <p className="hint-copy">
-              {detail?.session.summary ??
-                "Use the session routes to chat, inspect execution, browse artifacts, manage memory, and configure skills."}
-            </p>
-            <div className="session-header-meta">
-              <span className="status-pill">{detail?.session.status ?? "loading"}</span>
-              <span className="status-pill">
-                {detail?.skillSummary.effectiveSkillCount ?? 0} effective skill(s)
-              </span>
-              {latestModelLabel ? <span className="status-pill">{latestModelLabel}</span> : null}
-              {activeTask ? <span className="status-pill">{activeTask.title}</span> : null}
-            </div>
-            {streamCheckpoint ? (
-              <div className="session-stream-summary">
-                <strong>Recoverable stream checkpoint</strong>
-                <p>
-                  Run {streamCheckpoint.runId.slice(0, 8)} · seq{" "}
-                  {streamCheckpoint.lastSequence}
-                </p>
-                <p>{streamCheckpoint.draftReplyText || "No draft deltas recorded yet."}</p>
-              </div>
-            ) : null}
           </div>
 
-          <div className="session-header-actions">
-            <Link className="primary-button" href={`/sessions/${sessionId}/chat`}>
-              New task
-            </Link>
+          <div className="session-toolbar-meta">
+            <span className="status-pill">
+              {humanizeLabel(displaySession?.status ?? "loading")}
+            </span>
+            {latestModelLabel ? <span className="status-pill tone-sky">{latestModelLabel}</span> : null}
+            <span className="status-pill">{tasks.length} tasks</span>
+            <span className="status-pill">{artifacts.length} artifacts</span>
+          </div>
+
+          <div className="session-toolbar-actions">
             <button
               className="ghost-button"
               disabled={busyKey !== null}
@@ -367,27 +196,37 @@ export function SessionShell({ sessionId, children }: SessionShellProps) {
             <button
               className="ghost-button"
               disabled={busyKey !== null}
-              onClick={() => void handleToggleArchive()}
-              type="button"
-            >
-              {detail?.session.status === "archived" ? "Restore" : "Archive"}
-            </button>
-            <button
-              className="ghost-button"
-              disabled={busyKey !== null}
               onClick={() => void handleDuplicate()}
               type="button"
             >
               Duplicate
             </button>
-            <Link className="ghost-button" href={`/sessions/${sessionId}/settings`}>
-              Settings
-            </Link>
           </div>
-        </section>
+        </div>
 
-        <div className="session-page-slot">{children}</div>
-      </div>
+        <div className="session-toolbar-nav">
+          {sessionNav.map((item) => {
+            const href = `/sessions/${sessionId}${item.suffix}`;
+            const isActive = pathname === href;
+
+            return (
+              <Link
+                className={`workspace-tab${isActive ? " is-active" : ""}`}
+                href={href}
+                key={href}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </div>
+
+        <div className="session-toolbar-feedback">
+          {error ? <p className="error-copy">{error}</p> : null}
+        </div>
+      </section>
+
+      <div className="session-page-slot">{children}</div>
     </div>
   );
 }

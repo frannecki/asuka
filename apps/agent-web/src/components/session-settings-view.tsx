@@ -16,6 +16,12 @@ import type {
   SessionMemoryOverview,
   SessionSkillsDetail,
 } from "@/lib/types";
+import {
+  compactId,
+  excerpt,
+  formatDateTime,
+  humanizeLabel,
+} from "@/lib/view";
 
 type SessionSettingsViewProps = {
   sessionId: string;
@@ -157,14 +163,39 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
 
   return (
     <div className="session-settings-layout">
-      {error ? <p className="error-copy">{error}</p> : null}
-      {feedback ? <p className="hint-copy">{feedback}</p> : null}
+      <section className="hero-shell panel">
+        <div className="hero-copy">
+          <div>
+            <p className="eyebrow">Session settings</p>
+            <h2>Rename, duplicate, archive, and inspect the workspace envelope.</h2>
+          </div>
+          <p>
+            This page combines session detail, skill summary, memory overview,
+            and active run metadata into one control surface.
+          </p>
+          {error ? <p className="error-copy">{error}</p> : null}
+          {feedback ? <p className="status-pill tone-mint">{feedback}</p> : null}
+        </div>
+
+        <div className="hero-art">
+          <div className="hero-stat-strip">
+            <article className="hero-stat">
+              <strong>{detail?.skillSummary.effectiveSkillCount ?? 0}</strong>
+              <span>effective skills</span>
+            </article>
+            <article className="hero-stat">
+              <strong>{memoryOverview?.scopedDocuments.length ?? 0}</strong>
+              <span>scoped notes</span>
+            </article>
+          </div>
+        </div>
+      </section>
 
       <section className="panel stack-gap">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Session settings</p>
-            <h2>Workspace controls</h2>
+            <p className="eyebrow">Workspace controls</p>
+            <h2>Core session actions</h2>
           </div>
           <div className="stack-inline">
             <Link className="ghost-button" href={`/sessions/${sessionId}/chat`}>
@@ -181,7 +212,7 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
           </div>
         </div>
 
-        <form className="session-settings-form" onSubmit={handleRename}>
+        <form className="session-settings-form stack-gap" onSubmit={handleRename}>
           <label>
             Session title
             <input
@@ -209,11 +240,13 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
           <article className="session-settings-card">
             <p className="eyebrow">Workspace</p>
             <div className="status-strip">
-              <span className="status-pill">{detail?.session.status ?? "loading"}</span>
-              <span className="status-pill">
+              <span className="status-pill tone-sun">
+                {humanizeLabel(detail?.session.status ?? "loading")}
+              </span>
+              <span className="status-pill tone-sky">
                 {detail?.skillSummary.effectiveSkillCount ?? 0} skill(s)
               </span>
-              <span className="status-pill">
+              <span className="status-pill tone-mint">
                 {memoryOverview?.scopedDocuments.length ?? 0} scoped notes
               </span>
             </div>
@@ -226,7 +259,7 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
           <article className="session-settings-card">
             <p className="eyebrow">Skills</p>
             <p>
-              Policy: {skills?.policy.mode ?? "inheritDefault"}
+              Policy: {humanizeLabel(skills?.policy.mode ?? "inheritDefault")}
               {skills?.policy.presetId ? ` · ${skills.policy.presetId}` : ""}
             </p>
             <div className="session-chip-list">
@@ -236,7 +269,7 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
                 </span>
               ))}
               {detail?.skillSummary.pinnedSkills.length === 0 ? (
-                <span className="hint-copy">No pinned session skills.</span>
+                <span className="story-kicker">No pinned session skills.</span>
               ) : null}
             </div>
           </article>
@@ -258,16 +291,14 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
               {activeRun ? (
                 <>
                   <div className="status-strip">
-                    <span className="status-pill">{activeRun.status}</span>
-                    <span className="status-pill">{activeRun.streamStatus}</span>
+                    <span className="status-pill">{humanizeLabel(activeRun.status)}</span>
+                    <span className="status-pill">{humanizeLabel(activeRun.streamStatus)}</span>
                   </div>
                   <p>
                     {activeRun.selectedProvider ?? "Local runtime"} ·{" "}
                     {activeRun.selectedModel ?? "fallback"}
                   </p>
-                  <p className="hint-copy">
-                    event seq {activeRun.lastEventSequence}
-                  </p>
+                  <p className="hint-copy">Event seq {activeRun.lastEventSequence}</p>
                 </>
               ) : (
                 <p className="hint-copy">No run is currently active in this session.</p>
@@ -279,13 +310,13 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
               {latestRun ? (
                 <>
                   <div className="status-strip">
-                    <span className="status-pill">{latestRun.status}</span>
+                    <span className="status-pill">{humanizeLabel(latestRun.status)}</span>
                     {latestRun.selectedProvider ? (
                       <span className="status-pill">{latestRun.selectedProvider}</span>
                     ) : null}
                   </div>
                   <p>
-                    {latestRun.selectedModel ?? "fallback"} · {latestRun.startedAt}
+                    {latestRun.selectedModel ?? "fallback"} · {formatDateTime(latestRun.startedAt)}
                   </p>
                   <div className="session-chip-list">
                     {latestRun.pinnedSkillNames.map((skillName) => (
@@ -305,14 +336,10 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
               {streamCheckpoint ? (
                 <>
                   <div className="status-strip">
-                    <span className="status-pill">
-                      run {streamCheckpoint.runId.slice(0, 8)}
-                    </span>
-                    <span className="status-pill">
-                      seq {streamCheckpoint.lastSequence}
-                    </span>
+                    <span className="status-pill">Run {compactId(streamCheckpoint.runId)}</span>
+                    <span className="status-pill">Seq {streamCheckpoint.lastSequence}</span>
                   </div>
-                  <p>{streamCheckpoint.draftReplyText || "No draft delta persisted."}</p>
+                  <p>{excerpt(streamCheckpoint.draftReplyText, 180)}</p>
                 </>
               ) : (
                 <p className="hint-copy">
@@ -336,13 +363,13 @@ export function SessionSettingsView({ sessionId }: SessionSettingsViewProps) {
             {detail?.activeTaskSummary ? (
               <>
                 <div className="status-strip">
-                  <span className="status-pill">{detail.activeTaskSummary.status}</span>
+                  <span className="status-pill">{humanizeLabel(detail.activeTaskSummary.status)}</span>
                   <span className="status-pill">
-                    task {detail.activeTaskSummary.id.slice(0, 8)}
+                    Task {compactId(detail.activeTaskSummary.id)}
                   </span>
                 </div>
                 <strong>{detail.activeTaskSummary.title}</strong>
-                <p>{detail.activeTaskSummary.summary}</p>
+                <p>{excerpt(detail.activeTaskSummary.summary, 160)}</p>
               </>
             ) : (
               <p className="hint-copy">

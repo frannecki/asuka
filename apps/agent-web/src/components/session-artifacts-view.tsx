@@ -68,36 +68,33 @@ export function SessionArtifactsView({ sessionId }: SessionArtifactsViewProps) {
   const filteredArtifacts = selectedTaskId
     ? artifacts.filter((artifact) => artifact.taskId === selectedTaskId)
     : artifacts;
-  const visibleSelectedPath =
-    selectedPath && filteredArtifacts.some((artifact) => artifact.path === selectedPath)
-      ? selectedPath
-      : filteredArtifacts[0]?.path ?? pickDefaultWorkspacePath(workspaceTree) ?? null;
+
+  function handleSelectTaskId(taskId: string | null) {
+    const nextArtifacts = taskId
+      ? artifacts.filter((artifact) => artifact.taskId === taskId)
+      : artifacts;
+    setSelectedTaskId(taskId);
+    setSelectedPath(
+      nextArtifacts.find((artifact) => artifact.path === selectedPath)?.path ??
+        nextArtifacts[0]?.path ??
+        pickDefaultWorkspacePath(workspaceTree) ??
+        selectedPath,
+    );
+  }
 
   return (
-    <div className="stack-gap">
-      {tasks.length > 0 ? (
-        <div className="task-selector">
-          {tasks.map((task) => (
-            <button
-              className={`task-chip${task.id === selectedTaskId ? " is-active" : ""}`}
-              key={task.id}
-              onClick={() => setSelectedTaskId(task.id)}
-              type="button"
-            >
-              <strong>{task.title}</strong>
-              <span>{task.status}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {error ? <p className="error-copy">{error}</p> : null}
-      <WorkspacePanel
-        artifacts={filteredArtifacts}
-        onSelectPath={setSelectedPath}
-        selectedPath={visibleSelectedPath}
-        sessionId={sessionId}
-        tree={workspaceTree}
-      />
-    </div>
+    <WorkspacePanel
+      artifacts={filteredArtifacts}
+      error={error}
+      onSelectPath={setSelectedPath}
+      onSelectTaskId={handleSelectTaskId}
+      selectedPath={
+        selectedPath ?? filteredArtifacts[0]?.path ?? pickDefaultWorkspacePath(workspaceTree) ?? null
+      }
+      selectedTaskId={selectedTaskId}
+      sessionId={sessionId}
+      tasks={tasks}
+      tree={workspaceTree}
+    />
   );
 }

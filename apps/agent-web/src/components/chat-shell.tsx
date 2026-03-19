@@ -13,9 +13,9 @@ import {
   STREAM_EVENTS,
   buildRunEventsUrl,
   createSession,
+  getSession,
   getSessionActiveRun,
   getSessionWorkspaceTree,
-  getSession,
   getTaskExecution,
   listSessionArtifacts,
   listSessions,
@@ -27,6 +27,7 @@ import type {
   MessageRecord,
   RunEventEnvelope,
   RunStepRecord,
+  SessionDetail,
   SessionRecord,
   TaskRecord,
   ToolInvocationRecord,
@@ -38,13 +39,19 @@ import {
   disconnectRunStream,
 } from "@/components/chat-stream-state";
 import { SessionInspectorDrawer } from "@/components/session-inspector-drawer";
+import { pickDefaultWorkspacePath } from "@/components/workspace-panel";
 import {
-  pickDefaultWorkspacePath,
-} from "@/components/workspace-panel";
+  compactId,
+  excerpt,
+  formatModelLabel,
+  formatTime,
+  humanizeLabel,
+  isStructuredText,
+} from "@/lib/view";
 
 type ChatShellProps = {
   initialSessionId?: string;
-  routeMode?: "legacy" | "session";
+  routeMode?: "root" | "session";
 };
 
 type HarnessBundle = {
@@ -58,7 +65,7 @@ type HarnessBundle = {
 
 export function ChatShell({
   initialSessionId,
-  routeMode = "legacy",
+  routeMode = "root",
 }: ChatShellProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -72,6 +79,7 @@ export function ChatShell({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
     initialSessionId ?? null,
   );
+  const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -85,11 +93,37 @@ export function ChatShell({
   );
   const [composer, setComposer] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({});
   const [streamState, setStreamState] = useState(() => createChatStreamState());
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
   const [isPending, startTransition] = useTransition();
-  const showSessionRail = routeMode === "legacy";
   const selectedSessionId = initialSessionId ?? activeSessionId ?? sessions[0]?.id ?? null;
+  const listedSession =
+    sessions.find((session) => session.id === selectedSessionId) ?? null;
+  const selectedSession =
+    sessionDetail?.session.id === selectedSessionId
+      ? sessionDetail.session
+      : listedSession;
+  const selectedTask =
+    tasks.find((task) => task.id === activeTaskId) ?? tasks[0] ?? null;
+  const visibleArtifacts = artifacts.filter((artifact) =>
+    activeTaskId ? artifact.taskId === activeTaskId : true,
+  );
   const { activity, draftReply, modelLabel, status } = streamState;
+  const persistedModelLabel = formatModelLabel(
+    sessionDetail?.activeRunSummary?.selectedProvider ??
+      sessionDetail?.latestRunSummary?.selectedProvider,
+    sessionDetail?.activeRunSummary?.selectedModel ??
+      sessionDetail?.latestRunSummary?.selectedModel,
+  );
+  const displayModelLabel = modelLabel ?? persistedModelLabel;
+  const displayStatus =
+    status !== "idle"
+      ? status
+      : selectedTask?.status ??
+        sessionDetail?.activeTaskSummary?.status ??
+        sessionDetail?.latestRunSummary?.status ??
+        "idle";
 
   const applyStreamState = useCallback((nextState: typeof streamStateRef.current) => {
     streamStateRef.current = nextState;
@@ -123,8 +157,10 @@ export function ChatShell({
       try {
         const detail = await getSession(sessionId);
         startTransition(() => {
+          setSessionDetail(detail);
           setMessages(detail.messages);
         });
+        emitSessionUpdated(sessionId);
       } catch (loadError) {
         setError(
           loadError instanceof Error
@@ -210,22 +246,53 @@ export function ChatShell({
       sessionId: string,
       afterSequence?: number | null,
     ) {
-    clearReconnectTimer();
-    streamRef.current?.close();
+      clearReconnectTimer();
+      streamRef.current?.close();
 
-    const source = new EventSource(buildRunEventsUrl(runId, afterSequence));
-    streamRef.current = source;
+      const source = new EventSource(buildRunEventsUrl(runId, afterSequence));
+      streamRef.current = source;
 
-    for (const eventName of STREAM_EVENTS) {
-      source.addEventListener(eventName, (event) => {
-        const envelope = JSON.parse(
-          (event as MessageEvent<string>).data,
-        ) as RunEventEnvelope;
-        const transition = applyRunStreamEvent(
-          streamStateRef.current,
-          eventName,
-          envelope,
-        );
+      for (const eventName of STREAM_EVENTS) {
+        source.addEventListener(eventName, (event) => {
+          const envelope = JSON.parse(
+            (event as MessageEvent<string>).data,
+          ) as RunEventEnvelope;
+          const transition = applyRunStreamEvent(
+            streamStateRef.current,
+            eventName,
+            envelope,
+          );
+          const nextState = {
+            activity: transition.activity,
+            activeRunId: transition.activeRunId,
+            draftReply: transition.draftReply,
+            lastSequence: transition.lastSequence,
+            modelLabel: transition.modelLabel,
+            status: transition.status,
+          };
+          applyStreamState(nextState);
+
+          if (transition.shouldCloseStream) {
+            source.close();
+          }
+          if (transition.shouldRefreshSessions) {
+            void refreshSessions();
+          }
+          if (
+            selectedSessionId === envelope.sessionId &&
+            shouldRefreshHarnessFromEvent(eventName)
+          ) {
+            void loadHarness(envelope.sessionId, null, envelope.runId);
+          }
+          if (transition.sessionToReload) {
+            void loadSession(transition.sessionToReload);
+            void loadHarness(transition.sessionToReload);
+          }
+        });
+      }
+
+      source.onerror = () => {
+        const transition = disconnectRunStream(streamStateRef.current);
         const nextState = {
           activity: transition.activity,
           activeRunId: transition.activeRunId,
@@ -235,46 +302,15 @@ export function ChatShell({
           status: transition.status,
         };
         applyStreamState(nextState);
-
         if (transition.shouldCloseStream) {
           source.close();
         }
-        if (transition.shouldRefreshSessions) {
-          void refreshSessions();
+        if (transition.shouldReconnect) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            connectToRunStream(runId, sessionId, transition.lastSequence);
+          }, 1000);
         }
-        if (
-          selectedSessionId === envelope.sessionId &&
-          shouldRefreshHarnessFromEvent(eventName)
-        ) {
-          void loadHarness(envelope.sessionId, null, envelope.runId);
-        }
-        if (transition.sessionToReload) {
-          void loadSession(transition.sessionToReload);
-          void loadHarness(transition.sessionToReload);
-        }
-      });
-    }
-
-    source.onerror = () => {
-      const transition = disconnectRunStream(streamStateRef.current);
-      const nextState = {
-        activity: transition.activity,
-        activeRunId: transition.activeRunId,
-        draftReply: transition.draftReply,
-        lastSequence: transition.lastSequence,
-        modelLabel: transition.modelLabel,
-        status: transition.status,
       };
-      applyStreamState(nextState);
-      if (transition.shouldCloseStream) {
-        source.close();
-      }
-      if (transition.shouldReconnect) {
-        reconnectTimerRef.current = window.setTimeout(() => {
-          connectToRunStream(runId, sessionId, transition.lastSequence);
-        }, 1000);
-      }
-    };
     },
     [
       applyStreamState,
@@ -306,6 +342,9 @@ export function ChatShell({
 
         startTransition(() => {
           setSessions(nextSessions);
+          if (!initialSessionId && !activeSessionId && nextSessions[0]) {
+            setActiveSessionId(nextSessions[0].id);
+          }
         });
       })
       .catch((refreshError: unknown) => {
@@ -325,7 +364,7 @@ export function ChatShell({
       clearReconnectTimer();
       streamRef.current?.close();
     };
-  }, [clearReconnectTimer, startTransition]);
+  }, [activeSessionId, clearReconnectTimer, initialSessionId, startTransition]);
 
   useEffect(() => {
     clearReconnectTimer();
@@ -333,45 +372,54 @@ export function ChatShell({
     applyStreamState(createChatStreamState());
 
     if (!selectedSessionId) {
+      setIsSessionLoading(false);
+      startTransition(() => {
+        setSessionDetail(null);
+        setMessages([]);
+        setTasks([]);
+        setActiveTaskId(null);
+        setRunSteps([]);
+        setToolInvocations([]);
+        setArtifacts([]);
+        setSelectedWorkspacePath(null);
+        setExpandedMessages({});
+      });
       return;
     }
 
     let cancelled = false;
+    setIsSessionLoading(true);
 
-    void getSession(selectedSessionId)
-      .then((detail) => {
+    startTransition(() => {
+      setMessages([]);
+      setTasks([]);
+      setActiveTaskId(null);
+      setRunSteps([]);
+      setToolInvocations([]);
+      setArtifacts([]);
+      setSelectedWorkspacePath(null);
+      setExpandedMessages({});
+    });
+
+    void Promise.all([
+      getSession(selectedSessionId),
+      fetchHarnessBundle(
+        selectedSessionId,
+        null,
+        null,
+        taskSelectionRef.current,
+        workspaceSelectionRef.current,
+      ),
+    ])
+      .then(([detail, bundle]) => {
         if (cancelled) {
           return;
         }
 
         startTransition(() => {
+          setSessionDetail(detail);
           setMessages(detail.messages);
-        });
-      })
-      .catch((loadError: unknown) => {
-        if (cancelled) {
-          return;
-        }
-
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Failed to load the session.",
-        );
-      });
-    void fetchHarnessBundle(
-      selectedSessionId,
-      null,
-      null,
-      taskSelectionRef.current,
-      workspaceSelectionRef.current,
-    )
-      .then((bundle) => {
-        if (cancelled) {
-          return;
-        }
-
-        startTransition(() => {
+          setExpandedMessages({});
           setTasks(bundle.tasks);
           setActiveTaskId(bundle.selectedTaskId);
           setRunSteps(bundle.runSteps);
@@ -379,6 +427,7 @@ export function ChatShell({
           setArtifacts(bundle.artifacts);
           setSelectedWorkspacePath(bundle.selectedWorkspacePath);
         });
+        setIsSessionLoading(false);
       })
       .catch((loadError: unknown) => {
         if (cancelled) {
@@ -388,9 +437,11 @@ export function ChatShell({
         setError(
           loadError instanceof Error
             ? loadError.message
-            : "Failed to load harness state.",
+            : "Failed to load the session workspace.",
         );
+        setIsSessionLoading(false);
       });
+
     void getSessionActiveRun(selectedSessionId)
       .then(({ run }) => {
         if (cancelled || !run) {
@@ -432,8 +483,7 @@ export function ChatShell({
 
   function navigateToSession(sessionId: string) {
     setActiveSessionId(sessionId);
-    const destination =
-      routeMode === "session" ? `/sessions/${sessionId}/chat` : `/chat/${sessionId}`;
+    const destination = `/sessions/${sessionId}/chat`;
     if (pathname !== destination) {
       router.push(destination);
     }
@@ -441,10 +491,11 @@ export function ChatShell({
 
   async function handleCreateSession() {
     try {
-      const session = await createSession("New orchestration session");
+      const session = await createSession("New workspace session");
       setError(null);
       startTransition(() => {
         setSessions((current) => [session, ...current]);
+        setSessionDetail(null);
         setMessages([]);
         setTasks([]);
         setActiveTaskId(null);
@@ -452,6 +503,7 @@ export function ChatShell({
         setToolInvocations([]);
         setArtifacts([]);
         setSelectedWorkspacePath(null);
+        setExpandedMessages({});
       });
       navigateToSession(session.id);
     } catch (creationError) {
@@ -471,6 +523,7 @@ export function ChatShell({
     const session = await createSession("Fresh chat session");
     startTransition(() => {
       setSessions((current) => [session, ...current]);
+      setSessionDetail(null);
       setMessages([]);
     });
     navigateToSession(session.id);
@@ -511,139 +564,205 @@ export function ChatShell({
     }
   }
 
+  function toggleMessage(messageId: string) {
+    setExpandedMessages((current) => ({
+      ...current,
+      [messageId]: !current[messageId],
+    }));
+  }
+
+  const activeSessionSummary = selectedSession
+    ? excerpt(selectedSession.summary, 140)
+    : "Pick a session from the list or create a fresh one to begin.";
+
   return (
-    <div className={`chat-layout${showSessionRail ? "" : " chat-layout-session"}`}>
-      {showSessionRail ? (
-        <aside className="panel stack-gap">
-          <div className="panel-header">
+    <div className="workspace-shell-outer stack-gap">
+      <section className="command-shell">
+        <aside className="command-sidebar">
+          <div className="command-sidebar-head">
             <div>
-              <p className="eyebrow">Sessions</p>
-              <h2>Conversation state</h2>
+              <p className="eyebrow">Session index</p>
+              <h2>Open threads</h2>
             </div>
-            <button className="ghost-button" onClick={handleCreateSession}>
+            <button className="ghost-button" onClick={handleCreateSession} type="button">
               New
             </button>
           </div>
-          <div className="session-list">
+
+          <div className="command-session-list">
             {sessions.map((session) => (
               <button
-                key={session.id}
-                className={`session-card${
+                className={`command-session-row${
                   session.id === selectedSessionId ? " is-active" : ""
                 }`}
+                key={session.id}
                 onClick={() => navigateToSession(session.id)}
                 type="button"
               >
-                <strong>{session.title}</strong>
-                <span>{session.summary}</span>
+                <div className="command-session-main">
+                  <strong>{excerpt(session.title, 34)}</strong>
+                  <span className="command-session-copy">
+                    {excerpt(session.summary, 70)}
+                  </span>
+                </div>
+                <div className="command-session-meta">
+                  <span className={`command-status-dot is-${session.status}`} />
+                  <span>{session.lastRunAt ? "Recent" : "New"}</span>
+                </div>
               </button>
             ))}
-            {sessions.length === 0 ? (
-              <div className="empty-state small">
-                No sessions yet. Start one to exercise the agent loop.
-              </div>
-            ) : null}
           </div>
         </aside>
-      ) : null}
 
-      <section className="panel stack-gap">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Chat</p>
-            <h2>Session transcript</h2>
-          </div>
-          <div className="stack-inline">
-            {modelLabel ? <div className="status-pill">{modelLabel}</div> : null}
-            <div className="status-pill">{status}</div>
-          </div>
-        </div>
-
-        {routeMode === "session" ? (
-          <div className="chat-view-topline">
-            <p className="hint-copy">
-              Keep the conversation centered here. Use the inspector for live
-              activity, latest run details, and recent artifacts, then switch to
-              the dedicated execution or artifacts routes for the full harness view.
-            </p>
-          </div>
-        ) : null}
-
-        <div className="transcript">
-          {messages.map((message) => (
-            <article
-              key={message.id}
-              className={`message-bubble role-${message.role}`}
-            >
-              <header>
-                <span>{message.role}</span>
-                <time>{new Date(message.createdAt).toLocaleTimeString()}</time>
-              </header>
-              <p>{message.content}</p>
-            </article>
-          ))}
-
-          {draftReply ? (
-            <article className="message-bubble role-assistant">
-              <header>
-                <span>assistant</span>
-                <time>streaming</time>
-              </header>
-              <p>{draftReply}</p>
-            </article>
-          ) : null}
-
-          {messages.length === 0 && !draftReply ? (
-            <div className="empty-state">
-              The backend seeds one starter session, but you can create a fresh
-              one and begin streaming runs immediately.
+        <section className={`command-main${isSessionLoading ? " is-loading" : ""}`}>
+          <div className="command-main-head">
+            <div className="command-title-block">
+              <p className="eyebrow">{routeMode === "root" ? "Control room" : "Session board"}</p>
+              <h2>{selectedSession?.title ?? "No session selected"}</h2>
+              <p>{activeSessionSummary}</p>
+              {error ? <p className="error-copy command-error-inline">{error}</p> : null}
             </div>
-          ) : null}
-        </div>
-
-        <form className="composer" onSubmit={handleSendMessage}>
-          <textarea
-            className="composer-input"
-            id="chat-composer"
-            name="chat-composer"
-            onChange={(event) => setComposer(event.target.value)}
-            placeholder="Ask the agent to reason, call tools, or delegate to a subagent."
-            rows={4}
-            value={composer}
-          />
-          <div className="composer-actions">
-            {error ? <p className="error-copy">{error}</p> : <span />}
-            <button className="primary-button" disabled={isPending} type="submit">
-              Send
-            </button>
+            <div className="command-stats">
+              <div className="command-stat">
+                <span>Status</span>
+                <strong>{humanizeLabel(displayStatus)}</strong>
+              </div>
+              <div className="command-stat">
+                <span>Task</span>
+                <strong>{selectedTask ? compactId(selectedTask.id) : "None"}</strong>
+              </div>
+              <div className="command-stat">
+                <span>Messages</span>
+                <strong>{messages.length + (draftReply ? 1 : 0)}</strong>
+              </div>
+              <div className="command-stat">
+                <span>Outputs</span>
+                <strong>{visibleArtifacts.length}</strong>
+              </div>
+            </div>
           </div>
-        </form>
-      </section>
 
-      <SessionInspectorDrawer
-        activeTaskId={activeTaskId}
-        activity={activity}
-        artifacts={artifacts.filter((artifact) =>
-          activeTaskId ? artifact.taskId === activeTaskId : true,
-        )}
-        modelLabel={modelLabel}
-        onSelectPath={setSelectedWorkspacePath}
-        onSelectTaskId={(taskId) => {
-          const task = tasks.find((candidate) => candidate.id === taskId) ?? null;
-          if (selectedSessionId && task) {
-            void loadHarness(selectedSessionId, task.id, task.latestRunId);
-            return;
-          }
-          void loadTaskSelection(task);
-        }}
-        runSteps={runSteps}
-        selectedPath={selectedWorkspacePath}
-        sessionId={selectedSessionId}
-        status={status}
-        tasks={tasks}
-        toolInvocations={toolInvocations}
-      />
+          <div className="transcript command-transcript">
+            {isSessionLoading ? (
+              <div className="command-loading-stack" aria-hidden="true">
+                <div className="message-skeleton is-right" />
+                <div className="message-skeleton" />
+                <div className="message-skeleton is-right" />
+              </div>
+            ) : (
+              <>
+                {messages.map((message) => (
+                  <TranscriptMessage
+                    expanded={Boolean(expandedMessages[message.id])}
+                    key={message.id}
+                    message={message}
+                    onToggle={() => toggleMessage(message.id)}
+                  />
+                ))}
+
+                {draftReply ? (
+                  <article className="message-bubble role-assistant">
+                    <div className="message-meta">
+                      <span className="message-kicker">assistant</span>
+                      <time>streaming</time>
+                    </div>
+                    <p className="message-content">{draftReply}</p>
+                  </article>
+                ) : null}
+
+                {messages.length === 0 && !draftReply ? (
+                  <div className="empty-state">
+                    Select a session on the left or create a new one, then send a
+                    prompt. The center panel stays focused on the transcript only.
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+
+          <form className="composer command-composer" onSubmit={handleSendMessage}>
+            <textarea
+              className="composer-input"
+              id="chat-composer"
+              name="chat-composer"
+              onChange={(event) => setComposer(event.target.value)}
+              placeholder="Ask the agent to reason, call tools, inspect files, or delegate."
+              rows={4}
+              value={composer}
+            />
+            <div className="composer-actions">
+              <div className="command-composer-meta">
+                {displayModelLabel ? <span>{displayModelLabel}</span> : <span>No model yet</span>}
+                <span>Structured replies collapse automatically</span>
+              </div>
+              <button className="primary-button" disabled={isPending} type="submit">
+                Send prompt
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <SessionInspectorDrawer
+          activeTaskId={activeTaskId}
+          activity={activity}
+          artifacts={visibleArtifacts}
+          isLoading={isSessionLoading}
+          modelLabel={displayModelLabel}
+          onSelectPath={setSelectedWorkspacePath}
+          onSelectTaskId={(taskId) => {
+            const task = tasks.find((candidate) => candidate.id === taskId) ?? null;
+            if (selectedSessionId && task) {
+              void loadHarness(selectedSessionId, task.id, task.latestRunId);
+              return;
+            }
+            void loadTaskSelection(task);
+          }}
+          runSteps={runSteps}
+          selectedPath={selectedWorkspacePath}
+          sessionId={selectedSessionId}
+          status={displayStatus}
+          tasks={tasks}
+          toolInvocations={toolInvocations}
+        />
+      </section>
     </div>
+  );
+}
+
+function TranscriptMessage({
+  message,
+  expanded,
+  onToggle,
+}: {
+  message: MessageRecord;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const structured = isStructuredText(message.content);
+  const collapsible =
+    message.content.length > 560 || message.content.split(/\r?\n/).length > 10;
+  const contentClass = structured ? "message-pre" : "message-content";
+  const collapsedClass = collapsible && !expanded ? " is-collapsed" : "";
+
+  return (
+    <article className={`message-bubble role-${message.role}`}>
+      <div className="message-meta">
+        <span className="message-kicker">{message.role}</span>
+        <time>{formatTime(message.createdAt)}</time>
+      </div>
+
+      {structured ? (
+        <pre className={`${contentClass}${collapsedClass}`}>{message.content}</pre>
+      ) : (
+        <p className={`${contentClass}${collapsedClass}`}>{message.content}</p>
+      )}
+
+      {collapsible ? (
+        <button className="message-expand" onClick={onToggle} type="button">
+          {expanded ? "Collapse" : structured ? "Expand payload" : "Read more"}
+        </button>
+      ) : null}
+    </article>
   );
 }
 
@@ -717,4 +836,12 @@ function shouldRefreshHarnessFromEvent(eventType: string): boolean {
     "run.completed",
     "run.failed",
   ].includes(eventType);
+}
+
+function emitSessionUpdated(sessionId: string) {
+  window.dispatchEvent(
+    new CustomEvent("asuka:session-updated", {
+      detail: { sessionId },
+    }),
+  );
 }
